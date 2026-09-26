@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.py[cod]
+.pytest_cache/
 venv/
 
 # 运行时数据（含个人求职数据，不入库）
@@ -9,6 +10,7 @@ jobs.db-shm
 jobs.db-wal
 messages.json
 fetch_throttle.json
+_server.log
 .trash/
 .trashjobs_check.json
 
