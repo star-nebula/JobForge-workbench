@@ -594,4 +594,5 @@ def index():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    # 只监听本机回环：接口无鉴权且含个人求职数据，不暴露到局域网（2026-09-26）
+    uvicorn.run(app, host="127.0.0.1", port=8080)
