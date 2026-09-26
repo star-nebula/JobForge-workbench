@@ -112,6 +112,15 @@ def init_db():
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_scrape_log_time ON scrape_log(created_at)")
+        # 简历版本：个人资料快照（「一份资料多份简历」方向）
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS resume_versions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at INTEGER
+            )
+        """)
 
 
 def upsert_jobs(jobs: List[Dict]) -> List[Dict]:
@@ -384,6 +393,49 @@ def save_profile(data: Dict) -> int:
             (json.dumps(data, ensure_ascii=False), now),
         )
     return now
+
+
+# ---------- 简历版本（个人资料快照） ----------
+def list_resume_versions() -> List[Dict]:
+    """版本列表（不含 data 大字段），按创建时间倒序（id 倒序）。"""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, name, created_at FROM resume_versions ORDER BY id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def save_resume_version(name: str, data: Dict) -> int:
+    """把 data 存为一个命名版本快照，返回版本 id。"""
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO resume_versions (name, data, created_at) VALUES (?,?,?)",
+            ((name or "").strip()[:40] or "未命名版本",
+             json.dumps(data, ensure_ascii=False), int(time.time())),
+        )
+        return int(cur.lastrowid)
+
+
+def get_resume_version(version_id: int) -> Optional[Dict]:
+    """读单个版本（含 data）。不存在或 data 损坏返回 None。"""
+    with _conn() as c:
+        r = c.execute(
+            "SELECT id, name, data, created_at FROM resume_versions WHERE id=?", (version_id,)
+        ).fetchone()
+        if not r:
+            return None
+        d = dict(r)
+        try:
+            d["data"] = json.loads(d["data"])
+        except Exception:
+            return None
+        return d
+
+
+def delete_resume_version(version_id: int) -> bool:
+    with _conn() as c:
+        cur = c.execute("DELETE FROM resume_versions WHERE id=?", (version_id,))
+        return cur.rowcount > 0
 
 
 def add_scrape_log(platform: str, city: Optional[str], page: int, query_used: str,

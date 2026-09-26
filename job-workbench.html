@@ -644,7 +644,7 @@
           <div class="view-title">个人资料 <small>个人档案 · 简历解析比对 · 智能抓取匹配岗位</small></div>
           <div style="display:flex;gap:8px">
             <button class="btn" id="exportPdfBtn"><svg viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>导出 PDF</button>
-            <button class="btn">新建版本</button>
+            <button class="btn" id="newVersionBtn">新建版本</button>
             <button class="btn primary" id="openScrapeBtn"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>智能抓取</button>
           </div>
         </div>
@@ -656,7 +656,10 @@
             <div class="panel">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
                 <div class="panel-title">个人信息</div>
-                <button class="btn" id="profileEditBtn" style="padding:6px 12px;font-size:11.5px">✏️ 编辑</button>
+                <div style="display:flex;gap:6px">
+                  <button class="btn" id="versionsBtn" style="padding:6px 12px;font-size:11.5px">🗂 版本<span id="versionCount" style="margin-left:3px;color:var(--text-3)"></span></button>
+                  <button class="btn" id="profileEditBtn" style="padding:6px 12px;font-size:11.5px">✏️ 编辑</button>
+                </div>
               </div>
               <div id="profileCardBody"></div>
             </div>
@@ -725,13 +728,13 @@
               </div>
             </div>
 
-            <!-- 一键操作（原型，后期「一份资料多份简历」方向） -->
+            <!-- 一键操作（2026-09-26 真化：匹配分析引导 / 求职信模板生成；AI 润色待 LLM 后端立项） -->
             <div class="panel">
               <div class="panel-title" style="margin-bottom:12px">一键操作</div>
               <div style="display:flex;flex-direction:column;gap:8px">
-                <button class="btn" style="justify-content:flex-start"><span style="color:var(--accent)">🎯</span> 适配「蚂蚁集团·高级前端」</button>
-                <button class="btn" style="justify-content:flex-start"><span style="color:var(--green)">✨</span> AI 润色整份简历</button>
-                <button class="btn" style="justify-content:flex-start"><span style="color:var(--blue)">📋</span> 生成求职信</button>
+                <button class="btn" id="gotoMatchBtn" style="justify-content:flex-start"><span style="color:var(--accent)">🎯</span> 岗位匹配分析<span style="margin-left:auto;font-size:10.5px;color:var(--text-3)">在岗位详情弹窗内</span></button>
+                <button class="btn" id="coverLetterBtn" style="justify-content:flex-start"><span style="color:var(--blue)">📋</span> 生成求职信</button>
+                <button class="btn" disabled title="需接入 LLM 后端，待立项" style="justify-content:flex-start;opacity:.45;cursor:not-allowed"><span style="color:var(--green)">✨</span> AI 润色整份简历<span style="margin-left:auto;font-size:10.5px;color:var(--text-3)">待接入 LLM</span></button>
               </div>
             </div>
 
@@ -883,6 +886,45 @@
       <div id="paneHistory" style="display:none">
         <div id="scrapeHistory"></div>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- 简历版本管理小窗（快照 / 应用 / 删除） -->
+<div id="versionsModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:205;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(460px,92vw);max-height:70vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center">
+      <div style="font-size:15px;font-weight:700">🗂 简历版本</div>
+      <div style="flex:1"></div>
+      <button class="btn" id="versionsModalClose" style="padding:6px 11px" title="关闭">✕</button>
+    </div>
+    <div id="versionsList" style="flex:1;overflow-y:auto;padding:12px 18px"></div>
+    <div style="padding:10px 18px;border-top:1px solid var(--border);font-size:11.5px;color:var(--text-3)">「新建版本」把当前个人资料存为快照；「应用」用该版本覆盖当前资料（覆盖前可先新建版本备份）。</div>
+  </div>
+</div>
+
+<!-- 求职信生成小窗（本地模板，可选关联岗位） -->
+<div id="letterModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:205;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(640px,94vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center">
+      <div style="font-size:15px;font-weight:700">📋 生成求职信</div>
+      <div style="flex:1"></div>
+      <button class="btn" id="letterModalClose" style="padding:6px 11px" title="关闭">✕</button>
+    </div>
+    <div style="padding:12px 18px 0;display:flex;gap:8px;align-items:end">
+      <div style="flex:1">
+        <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">关联岗位（可选）· 模板按个人资料真实信息生成，可直接修改</div>
+        <select id="letterJob" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:13px">
+          <option value="">不关联岗位（通用求职信）</option>
+        </select>
+      </div>
+      <button class="btn primary" id="letterGenBtn" style="padding:9px 14px">生成</button>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:12px 18px">
+      <textarea id="letterText" style="width:100%;min-height:260px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:13px;line-height:1.7;resize:vertical;font-family:inherit" placeholder="点击「生成」按模板生成求职信，生成后可在此直接修改"></textarea>
+    </div>
+    <div style="padding:10px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
+      <button class="btn" id="letterCopyBtn">复制全文</button>
     </div>
   </div>
 </div>
@@ -1413,6 +1455,7 @@ async function loadProfileView(){
   if(dp)dp.style.display='none';
   renderProfileCard();renderResumePreview();
   refreshScore();
+  refreshVersions();
 }
 
 // --- 评分 + 优化建议（profile_score 规则引擎） ---
@@ -1492,6 +1535,113 @@ document.getElementById('applyDiffBtn').addEventListener('click',async()=>{
     showToast('个人资料已更新',`已采纳 ${n} 项变更并保存简历原文`);
   }catch(e){showToast('保存失败',e.message);}
   finally{btn.disabled=false;btn.innerHTML='采纳选中项，更新个人资料';}
+});
+
+// ===== 简历版本（快照 / 应用 / 删除） =====
+async function refreshVersions(){
+  const list=document.getElementById('versionsList');
+  const badge=document.getElementById('versionCount');
+  let versions=[];
+  try{
+    const r=await fetch('/api/profile/versions');
+    versions=(await r.json()).versions||[];
+  }catch(e){}
+  if(badge)badge.textContent=versions.length?`(${versions.length})`:'';
+  if(!list)return;
+  if(!versions.length){
+    list.innerHTML='<div style="text-align:center;padding:24px 8px;color:var(--text-3);font-size:12.5px">还没有版本。用顶部「新建版本」把当前个人资料存为快照，之后可随时切换不同侧重的简历。</div>';
+    return;
+  }
+  list.innerHTML=versions.map(v=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 10px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px">
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escHtml(v.name)}</div>
+        <div style="font-size:11px;color:var(--text-3);margin-top:2px">${new Date(v.created_at*1000).toLocaleString()}</div>
+      </div>
+      <button class="btn" data-vapply="${v.id}" data-vname="${_escHtml(v.name)}" style="padding:5px 12px;font-size:11.5px">应用</button>
+      <button class="btn" data-vdel="${v.id}" style="padding:5px 10px;font-size:11.5px;color:var(--red)">删除</button>
+    </div>`).join('');
+}
+document.getElementById('newVersionBtn').addEventListener('click',async()=>{
+  if(!currentProfile||!currentProfile.data||!Object.keys(currentProfile.data).length){
+    showToast('还没有个人资料','先填写或采纳资料，再存为版本');return;
+  }
+  const name=(prompt('版本名称（如：偏后端版 / 偏管理版）：','')||'').trim();
+  if(!name)return;
+  try{
+    const r=await fetch('/api/profile/versions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'保存失败');
+    showToast('版本已保存',`「${name}」已快照当前个人资料`);
+    refreshVersions();
+  }catch(e){showToast('版本保存失败',e.message);}
+});
+document.getElementById('versionsBtn').addEventListener('click',()=>{
+  document.getElementById('versionsModal').style.display='flex';
+  refreshVersions();
+});
+document.getElementById('versionsModalClose').addEventListener('click',()=>document.getElementById('versionsModal').style.display='none');
+document.getElementById('versionsModal').addEventListener('click',e=>{if(e.target.id==='versionsModal')e.target.style.display='none'});
+document.getElementById('versionsList').addEventListener('click',async e=>{
+  const ap=e.target.closest('[data-vapply]'), dl=e.target.closest('[data-vdel]');
+  if(ap){
+    if(!confirm(`用版本「${ap.dataset.vname}」覆盖当前个人资料？\n当前资料会被覆盖，可先「新建版本」备份`))return;
+    try{
+      const r=await fetch(`/api/profile/versions/${ap.dataset.vapply}/apply`,{method:'POST'});
+      const d=await r.json();
+      if(!r.ok)throw new Error(d.detail||'应用失败');
+      currentProfile={data:d.data,updated_at:d.updated_at};
+      renderProfileCard();renderResumePreview();refreshScore();
+      document.getElementById('versionsModal').style.display='none';
+      showToast('版本已应用','当前个人资料已切换为该版本');
+    }catch(err){showToast('应用失败',err.message);}
+  }else if(dl){
+    if(!confirm('确认删除该版本？'))return;
+    try{
+      const r=await fetch(`/api/profile/versions/${dl.dataset.vdel}`,{method:'DELETE'});
+      if(!r.ok)throw new Error('删除失败');
+      refreshVersions();
+    }catch(err){showToast('删除失败',err.message);}
+  }
+});
+
+// ===== 一键操作（匹配分析引导 / 求职信模板） =====
+document.getElementById('gotoMatchBtn').addEventListener('click',()=>{
+  const nav=document.querySelector('.nav-item[data-view="jobs"]');
+  if(nav)nav.click();
+  showToast('岗位匹配分析','在岗位市场点开任意岗位，详情弹窗内有「技能对照」');
+});
+document.getElementById('coverLetterBtn').addEventListener('click',async()=>{
+  document.getElementById('letterModal').style.display='flex';
+  const sel=document.getElementById('letterJob');
+  sel.innerHTML='<option value="">不关联岗位（通用求职信）</option>';
+  try{
+    const r=await fetch('/api/jobs');
+    const jobs=(await r.json()).jobs||[];
+    sel.innerHTML+='<option value="" disabled>—— 关联岗位市场岗位 ——</option>'+
+      jobs.slice(0,50).map(j=>`<option value="${_escHtml(j.platform)}|${_escHtml(String(j.job_id))}">${_escHtml((j.title||'(无标题)')+' · '+(j.company||''))}</option>`).join('');
+  }catch(e){}
+});
+document.getElementById('letterModalClose').addEventListener('click',()=>document.getElementById('letterModal').style.display='none');
+document.getElementById('letterModal').addEventListener('click',e=>{if(e.target.id==='letterModal')e.target.style.display='none'});
+document.getElementById('letterGenBtn').addEventListener('click',async()=>{
+  const sel=document.getElementById('letterJob').value||'';
+  const [platform,jobId]=sel?sel.split('|'):['',''];
+  const btn=document.getElementById('letterGenBtn');
+  btn.disabled=true;btn.textContent='生成中…';
+  try{
+    const r=await fetch('/api/cover-letter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:platform||'boss',job_id:jobId||null})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'生成失败');
+    document.getElementById('letterText').value=d.letter||'';
+  }catch(e){showToast('生成失败',e.message);}
+  finally{btn.disabled=false;btn.textContent='生成';}
+});
+document.getElementById('letterCopyBtn').addEventListener('click',async()=>{
+  const t=document.getElementById('letterText').value.trim();
+  if(!t){showToast('还没有内容','先点「生成」再复制');return;}
+  try{await navigator.clipboard.writeText(t);showToast('已复制','求职信全文已复制到剪贴板');}
+  catch(e){document.getElementById('letterText').select();document.execCommand('copy');showToast('已复制','求职信全文已复制到剪贴板');}
 });
 
 // ===== Smart Scrape =====
@@ -2107,6 +2257,7 @@ async function openJobDetail(platform, jobId){
   body.innerHTML='<div style="text-align:center;padding:30px 0;color:var(--text-3)"><div style="font-size:26px;margin-bottom:8px">⏳</div>加载岗位信息…</div>';
   document.getElementById('jdModalLink').href='#';
   modal.style.display='flex';
+  await _ensureProfile();
   try{
     const r=await fetch(`/api/jobs/${encodeURIComponent(platform)}/${encodeURIComponent(jobId)}`);
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -2117,6 +2268,45 @@ async function openJobDetail(platform, jobId){
   }catch(e){
     body.innerHTML=`<div style="text-align:center;padding:30px 0;color:var(--red)">加载失败：${_escHtml(e.message)}</div>`;
   }
+}
+let _profileFetched=false;
+async function _ensureProfile(){
+  // 详情弹窗可能在任何视图打开；首次拉一次个人资料，供技能对照使用
+  if(!_profileFetched){
+    _profileFetched=true;
+    try{
+      const r=await fetch('/api/profile');
+      const d=await r.json();
+      currentProfile=(d&&d.profile)?d.profile:null;
+    }catch(e){}
+  }
+  return currentProfile;
+}
+// 技能对照：岗位标签 vs 个人资料技能（✓=命中；+=岗位要求但资料未列）。纯本地比对，缺任一侧不显示
+function _skillCompareHtml(tags){
+  const d=(currentProfile&&currentProfile.data)||{};
+  let skills=d.skills||[];
+  if(typeof skills==='string')skills=skills.split(/[，,、；;/\s]+/);
+  skills=(skills||[]).map(s=>(s||'').toString().trim()).filter(Boolean);
+  if(!tags.length||!skills.length)return'';
+  const norm=s=>s.toLowerCase();
+  const ps=skills.map(norm);
+  const matched=[],missing=[];
+  tags.forEach(t=>{
+    const raw=(t||'').toString().trim();
+    const n=norm(raw);
+    if(!n)return;
+    (ps.some(s=>s===n||s.includes(n)||n.includes(s))?matched:missing).push(raw);
+  });
+  if(!matched.length&&!missing.length)return'';
+  const chip=(t,st)=>`<span style="font-size:11px;padding:2px 8px;border-radius:5px;${st}">${_escHtml(t)}</span>`;
+  return `<div style="margin:0 0 12px">
+    <div style="font-size:12px;color:var(--text-3);font-weight:600;margin-bottom:6px">技能对照 <span style="font-weight:400">岗位标签 vs 个人资料</span></div>
+    <div style="display:flex;flex-wrap:wrap;gap:5px">
+      ${matched.map(t=>chip('✓ '+t,'color:var(--green);background:rgba(34,197,94,.12)')).join('')}
+      ${missing.map(t=>chip('+ '+t,'color:var(--red);background:rgba(239,68,68,.10)')).join('')}
+    </div>
+  </div>`;
 }
 function renderJobDetailModal(j){
   const head=document.getElementById('jdModalHead');
@@ -2145,6 +2335,7 @@ function renderJobDetailModal(j){
         <div style="display:flex;gap:8px;margin-left:auto">${dimRow}</div>
       </div>
       ${dims.reasoning?`<div class="score-tip" style="margin:0 0 12px">💡 ${_escHtml(dims.reasoning)}</div>`:''}`:''}
+    ${_skillCompareHtml(j.tags||[])}
     <div style="font-size:12px;color:var(--text-3);font-weight:600;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase">职位描述（JD）</div>
     <div id="jdText" style="font-size:13px;line-height:1.8;color:var(--text-2);white-space:pre-wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:14px;min-height:60px">
       <span style="color:var(--text-3)">正在获取 JD 正文…</span>

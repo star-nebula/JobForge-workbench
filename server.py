@@ -16,11 +16,17 @@ FastAPI + spider.py
   GET  /api/profile            读个人资料（无则 null）
   PUT  /api/profile            保存个人资料（JSON 全量覆盖）
   GET  /api/profile/score      个人资料评分 + 优化建议（本地规则引擎）
+  GET  /api/profile/versions   简历版本列表（快照，不含资料大字段）
+  POST /api/profile/versions   当前资料存为命名版本快照
+  POST /api/profile/versions/{id}/apply   用版本覆盖当前资料
+  DELETE /api/profile/versions/{id}       删除版本
+  POST /api/cover-letter       求职信生成（本地模板，可选关联岗位）
   GET  /                       静态页面入口
 """
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -131,6 +137,60 @@ def _human_age(sec: int) -> str:
     if sec < 86400:
         return f"{sec // 3600} 小时前"
     return f"{sec // 86400} 天前"
+
+
+def _build_cover_letter(pdata: Dict, job: Optional[Dict]) -> str:
+    """求职信模板：全部取自个人资料与岗位真实字段；缺失信息留【】占位，不编造事实。"""
+    def s(k: str) -> str:
+        v = pdata.get(k)
+        return v.strip() if isinstance(v, str) else ""
+    skills = pdata.get("skills") or []
+    if isinstance(skills, str):
+        skills = [x.strip() for x in re.split(r"[，,、；;/\s]+", skills) if x.strip()]
+    skills = [x for x in skills if x]
+    name = s("name") or "【你的姓名】"
+    job = job or {}
+    title = (job.get("title") or "").strip()
+    company = (job.get("company") or "").strip()
+    tags = [str(t).strip() for t in (job.get("tags") or []) if str(t).strip()]
+
+    lines = ["您好！", ""]
+    if company and title:
+        lines.append(f"我是{name}，从 BOSS 直聘看到贵司「{company} · {title}」岗位与我的方向十分契合，特此投递。")
+    elif title:
+        lines.append(f"我是{name}，看到贵司正在招聘「{title}」岗位，与我的方向十分契合，特此投递。")
+    else:
+        lines.append(f"我是{name}，正在寻找新的职业机会，特此投递简历，期待与您沟通。")
+    lines.append("")
+    if s("summary"):
+        lines.append(s("summary"))
+        lines.append("")
+    if skills:
+        fit = f"，与岗位要求的{'、'.join(tags[:5])}方向吻合" if tags else ""
+        lines.append(f"技能方面，我熟悉{'、'.join(skills[:6])}等{fit}。")
+        lines.append("")
+    if s("experience"):
+        exp = s("experience")
+        lines.append(f"工作经历上：{exp[:120].rstrip()}{'……' if len(exp) > 120 else ''}")
+        lines.append("")
+    wants = []
+    if s("city"):
+        wants.append(f"期望工作地点为{s('city')}")
+    if s("expected_salary"):
+        wants.append(f"期望薪资{s('expected_salary')}")
+    if wants:
+        lines.append("，".join(wants) + "。")
+        lines.append("")
+    lines.append("简历中有更完整的经历与项目信息，期待有机会与您进一步沟通。")
+    lines.append("")
+    lines.append("此致")
+    lines.append("敬礼！")
+    lines.append("")
+    lines.append(name)
+    contact = " · ".join(x for x in [s("phone"), s("email")] if x)
+    if contact:
+        lines.append(contact)
+    return "\n".join(lines)
 
 
 # ---------- CDP Chrome 自动启动 ----------
@@ -296,6 +356,61 @@ def get_profile_score():
     if not p or not isinstance(p.get("data"), dict):
         return {"score": 0, "level": "未填写", "checks": []}
     return profile_score.compute_profile_score(p["data"])
+
+
+# ---------- 简历版本（一份资料多份简历） ----------
+class VersionReq(BaseModel):
+    name: str = Field(..., min_length=1, max_length=40, description="版本名")
+
+
+@app.get("/api/profile/versions")
+def get_profile_versions():
+    """简历版本列表（不含资料大字段），按创建时间倒序。"""
+    return {"versions": db.list_resume_versions()}
+
+
+@app.post("/api/profile/versions")
+def create_profile_version(req: VersionReq):
+    """把当前个人资料存为命名版本快照。当前无资料时 404。"""
+    p = db.get_profile()
+    if not p or not isinstance(p.get("data"), dict):
+        raise HTTPException(status_code=404, detail="当前没有个人资料，先填写或采纳后再存版本")
+    vid = db.save_resume_version(req.name, p["data"])
+    return {"ok": True, "id": vid, "versions": db.list_resume_versions()}
+
+
+@app.post("/api/profile/versions/{version_id}/apply")
+def apply_profile_version(version_id: int):
+    """用指定版本覆盖当前个人资料（覆盖前可在前端确认；当前资料可先「新建版本」备份）。"""
+    v = db.get_resume_version(version_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="版本不存在")
+    updated_at = db.save_profile(v["data"])
+    return {"ok": True, "updated_at": updated_at, "data": v["data"]}
+
+
+@app.delete("/api/profile/versions/{version_id}")
+def remove_profile_version(version_id: int):
+    if not db.delete_resume_version(version_id):
+        raise HTTPException(status_code=404, detail="版本不存在")
+    return {"ok": True, "versions": db.list_resume_versions()}
+
+
+# ---------- 求职信（本地模板生成，零 LLM） ----------
+class CoverLetterReq(BaseModel):
+    platform: str = Field("boss")
+    job_id: Optional[str] = Field(None, description="关联岗位（可选；为空生成通用求职信）")
+
+
+@app.post("/api/cover-letter")
+def create_cover_letter(req: CoverLetterReq):
+    """按个人资料真实信息套模板生成求职信文本。"""
+    p = db.get_profile()
+    pdata = (p or {}).get("data") or {}
+    job = db.get_job(req.platform, req.job_id) if req.job_id else None
+    if req.job_id and not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True, "letter": _build_cover_letter(pdata, job)}
 
 
 @app.post("/api/crawl")
