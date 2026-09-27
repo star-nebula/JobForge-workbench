@@ -1871,7 +1871,8 @@ function _pollBatch(){
       chip.textContent=s.running?`🤖 ${s.done}/${s.total} ${s.failed?`· 失败${s.failed}`:''} · ${s.current||'…'} ⏹`:`✅ 完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}（点击收起）`;
       if(!s.running){
         clearInterval(_batchTimer);_batchTimer=null;
-        showToast('批量分析完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
+        if(s.stop)showToast('批量分析已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
+        else showToast('批量分析完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
         loadJobs();
       }
     }catch(e){}
@@ -1881,7 +1882,11 @@ document.getElementById('batchChip').addEventListener('click',async()=>{
   const chip=document.getElementById('batchChip');
   if(chip.textContent.startsWith('🤖')){
     if(!confirm('停止批量分析？已完成的部分会保留。'))return;
-    await fetch('/api/analyze-batch/stop',{method:'POST'});
+    chip.textContent='⏹ 停止中…';
+    try{
+      const d=await(await fetch('/api/analyze-batch/stop',{method:'POST'})).json();
+      if(d&&d.note)showToast('正在停止',d.note);
+    }catch(e){}
   }else{
     chip.style.display='none';
   }

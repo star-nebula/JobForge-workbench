@@ -519,6 +519,12 @@ class AnalyzeBatchReq(BaseModel):
 
 _batch = {"running": False, "stop": False, "total": 0, "done": 0,
           "ok": 0, "failed": 0, "current": "", "errors": []}
+# 批量取消：Event 传给 worker 与 _fetch_jd_core；procs 收集批量期间在跑的子进程，
+# stop 端点直接 kill（2026-09-27：标志位只在岗位边界检查 + 子进程最长阻塞 150s，
+# 点停止后要等几分钟才生效——用户实测「点了确认不会停」）
+_batch_cancel = threading.Event()
+_batch_procs = set()
+_batch_proc_lock = threading.Lock()
 
 
 @app.post("/api/analyze-batch")
@@ -547,26 +553,33 @@ def start_analyze_batch(req: AnalyzeBatchReq):
         return {"ok": True, "started": False, "message": "没有需要分析的岗位（已有分析的可用「强制重分析」）"}
     _batch.update({"running": True, "stop": False, "total": len(jobs), "done": 0,
                    "ok": 0, "failed": 0, "current": "", "errors": []})
-    threading.Thread(target=_batch_worker, args=(jobs, cfg), daemon=True).start()
+    _batch_cancel.clear()
+    threading.Thread(target=_batch_worker, args=(jobs, cfg, _batch_cancel), daemon=True).start()
     return {"ok": True, "started": True, "total": len(jobs)}
 
 
-def _batch_worker(jobs, cfg):
+def _batch_worker(jobs, cfg, cancel: threading.Event):
     consecutive_fail = 0
     for j in jobs:
-        if _batch["stop"]:
+        if _batch["stop"] or cancel.is_set():
             break
         _batch["current"] = f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}"
         try:
-            jd_res = _fetch_jd_core(j, refresh=False)
+            jd_res = _fetch_jd_core(j, refresh=False, cancel=cancel)
+            if cancel.is_set():
+                break
             if not jd_res.get("ok"):
                 raise llm.LLMError(jd_res.get("error") or "JD 抓取失败")
             fresh = db.get_job(j["platform"], j["job_id"]) or j
             analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, fresh)
+            if cancel.is_set():
+                break
             db.save_job_analysis(j["platform"], j["job_id"], analysis)
             _batch["ok"] += 1
             consecutive_fail = 0
         except Exception as e:
+            if cancel.is_set():
+                break
             _batch["failed"] += 1
             if len(_batch["errors"]) < 20:
                 _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {e}"[:160])
@@ -590,8 +603,21 @@ def analyze_batch_status():
 
 @app.post("/api/analyze-batch/stop")
 def analyze_batch_stop():
+    """停止批量分析：置标志位 + 立即 kill 正在跑的 JD 抓取子进程。
+    标志位只在岗位边界检查，若当前岗位卡在子进程里（最长 150s）会等很久才停
+    ——用户实测「点确认不会停」即此（2026-09-27）。kill 后 worker 秒级退出。"""
     _batch["stop"] = True
-    return {"ok": True}
+    _batch_cancel.set()
+    killed = 0
+    with _batch_proc_lock:
+        procs = list(_batch_procs)
+    for p in procs:
+        try:
+            p.kill()
+            killed += 1
+        except Exception:
+            pass
+    return {"ok": True, "killed_procs": killed, "note": "当前岗位的 JD 抓取已中断，稍候 1~2 秒即停"}
 
 
 @app.post("/api/crawl")
@@ -770,9 +796,37 @@ def get_job_jd(platform: str, job_id: str, refresh: bool = False):
     return _fetch_jd_core(job, refresh)
 
 
-def _fetch_jd_core(job: Dict, refresh: bool = False) -> Dict:
+def _fetch_jd_core(job: Dict, refresh: bool = False,
+                   cancel: Optional[threading.Event] = None) -> Dict:
     """确保岗位有 JD：缓存直读（历史脏缓存出口兜底清洗并写回），缺失则
-    原生通道 → CDP 兜底 → requests 直连三层降级。详情弹窗与批量分析共用。"""
+    原生通道 → CDP 兜底 → requests 直连三层降级。详情弹窗与批量分析共用。
+    cancel：批量停止时置位——正在跑的子进程会被登记并在 stop 端点直接 kill，
+    使停止在秒级生效（标志位只在岗位边界检查，子进程最长阻塞 150s）。"""
+    def _run_fetch_jd(env_extra=None):
+        """跑 fetch_jd.py 子进程；登记到 _batch_procs 供 stop 端点 kill。"""
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd.py"),
+             platform, job_id, job["url"],
+             job.get("title") or "", job.get("company") or ""],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=PROJECT_DIR, env=({**os.environ, **(env_extra or {})} if env_extra else None),
+        )
+        with _batch_proc_lock:
+            _batch_procs.add(proc)
+        try:
+            try:
+                out, err = proc.communicate(timeout=150)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                return None, f"抓取超时（150s）"
+            line = (out or "").strip().splitlines()
+            d2 = json.loads(line[-1]) if line else {}
+            return d2, None
+        finally:
+            with _batch_proc_lock:
+                _batch_procs.discard(proc)
+
     platform, job_id = job["platform"], job["job_id"]
     if job.get("jd_text") and not refresh:
         # 历史缓存可能含招聘者卡/公司介绍等冗余块（清洗上线前入库），出口兜底
@@ -788,43 +842,41 @@ def _fetch_jd_core(job: Dict, refresh: bool = False) -> Dict:
         # 原生键鼠零浏览器痕迹）。不预启动调试 Chrome，让系统平时保持无 9222 端口
         fetch_err = None
         try:
-            r2 = subprocess.run(
-                [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd.py"),
-                 platform, job_id, job["url"],
-                 job.get("title") or "", job.get("company") or ""],
-                capture_output=True, text=True, timeout=150, cwd=PROJECT_DIR,
-            )
-            line = (r2.stdout or "").strip().splitlines()
-            d2 = json.loads(line[-1]) if line else {}
-            if d2.get("ok") and d2.get("jd"):
+            d2, terr = _run_fetch_jd()
+            if terr:
+                fetch_err = terr
+            elif d2.get("ok") and d2.get("jd"):
                 db.save_jd(platform, job_id, d2["jd"][:20000])
                 return {"ok": True, "jd": d2["jd"][:20000], "cached": False}
-            fetch_err = d2.get("error") or "抓取失败"
+            else:
+                fetch_err = (d2 or {}).get("error") or "抓取失败"
         except Exception as e:
             fetch_err = f"抓取异常: {type(e).__name__}: {e}"
+
+        # 停止信号已在子进程 kill 后置位时，直接返回（不再走兜底链路）
+        if cancel is not None and cancel.is_set():
+            return {"ok": False, "error": "已停止"}
 
         # 兜底1：原生失败且 9222 不可达 → 此刻才拉调试 Chrome，用 CDP 通道重试一次
         if fetch_err and "9222 不可达" in fetch_err:
             ok, note = _ensure_cdp_chrome()
             if ok:
                 try:
-                    env = {**os.environ, "FETCH_JD_MODE": "cdp"}
-                    r2 = subprocess.run(
-                        [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd.py"),
-                         platform, job_id, job["url"],
-                         job.get("title") or "", job.get("company") or ""],
-                        capture_output=True, text=True, timeout=90, cwd=PROJECT_DIR, env=env,
-                    )
-                    line = (r2.stdout or "").strip().splitlines()
-                    d2 = json.loads(line[-1]) if line else {}
-                    if d2.get("ok") and d2.get("jd"):
+                    d2, terr = _run_fetch_jd({"FETCH_JD_MODE": "cdp"})
+                    if terr:
+                        fetch_err = terr
+                    elif d2.get("ok") and d2.get("jd"):
                         db.save_jd(platform, job_id, d2["jd"][:20000])
                         return {"ok": True, "jd": d2["jd"][:20000], "cached": False}
-                    fetch_err = d2.get("error") or "CDP 兜底抓取失败"
+                    else:
+                        fetch_err = (d2 or {}).get("error") or "CDP 兜底抓取失败"
                 except Exception as e:
                     fetch_err = f"CDP 兜底抓取异常: {type(e).__name__}: {e}"
             else:
                 fetch_err = f"{fetch_err}；且无法启动调试浏览器：{note}"
+
+        if cancel is not None and cancel.is_set():
+            return {"ok": False, "error": "已停止"}
 
         # 兜底：requests 直连详情页 HTML（可能被「请稍候」挑战拦截）
         cookies = spider._load_cookies("boss")
@@ -897,8 +949,9 @@ if __name__ == "__main__":
     import urllib.request
     import uvicorn
     # 只监听本机回环：接口无鉴权且含个人求职数据，不暴露到局域网（2026-09-26）
-    # 防双实例：Windows 下 asyncio 默认 SO_REUSEADDR 允许双绑同一端口，请求会随机落到
-    # 新旧两个进程（2026-09-27 事故：状态与批量线程分家）。启动前先探活
+    # 防重复启动（如连点两次 run.bat）：启动前探活 8080。
+    # 注意：venv 的 python.exe 会派生出基础解释器子进程，任务管理器里两个 python
+    # 属同一实例的正常父子形态（2026-09-27 曾误判为「双实例双绑」，已更正）。
     try:
         urllib.request.urlopen("http://127.0.0.1:8080/api/platforms", timeout=2)
         print("[JobForge] 8080 端口已有 JobForge 实例在运行，本次启动取消。如确需重启，请先结束旧的 server.py 进程。")

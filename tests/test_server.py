@@ -70,3 +70,29 @@ def test_analyze_batch_no_jobs_no_start(monkeypatch):
     monkeypatch.setattr(server.db, "list_jobs", lambda status=None: [])
     r = server.start_analyze_batch(AnalyzeBatchReq())
     assert r["ok"] is True and r["started"] is False
+
+
+def test_batch_stop_kills_running_procs(monkeypatch):
+    """停止必须立即 kill 在跑的子进程——旧实现只置标志位，卡在 150s 子进程里
+    时点「确认」要等几分钟才停（2026-09-27 用户实测）。"""
+    killed = []
+
+    class FakeProc:
+        def kill(self):
+            killed.append(1)
+
+    server._batch.update({"running": True, "stop": False})
+    server._batch_cancel.clear()
+    with server._batch_proc_lock:
+        p = FakeProc()
+        server._batch_procs.add(p)
+    try:
+        r = server.analyze_batch_stop()
+        assert r["ok"] is True and r["killed_procs"] == 1
+        assert killed == [1]                 # 子进程被 kill
+        assert server._batch["stop"] is True  # 标志位同时置位
+        assert server._batch_cancel.is_set()  # Event 置位（worker 边界检查）
+    finally:
+        with server._batch_proc_lock:
+            server._batch_procs.discard(p)
+        server._batch_cancel.clear()
