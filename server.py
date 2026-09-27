@@ -351,6 +351,10 @@ def refresh_cookies():
 def native_status():
     """原生通道就绪检查（Chrome 是否开着 zhipin 页 + 节流剩余秒数）。
     subprocess 跑 fetch_jd_native.py --check-json（不导航、不抢焦点，约 2~5 秒）。"""
+    return _native_channel_status()
+
+
+def _native_channel_status() -> Dict:
     try:
         r = subprocess.run(
             [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd_native.py"), "--check-json"],
@@ -525,11 +529,17 @@ def start_analyze_batch(req: AnalyzeBatchReq):
     cfg = _get_llm_config(req.model_id)
     if not cfg:
         return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
-    # 预检：先 ping 一次模型。批量一跑几十个岗位、每个几十秒，配置不可用必须当场拦下
+    # 预检 1：先 ping 一次模型。批量一跑几十个岗位、每个几十秒，配置不可用必须当场拦下
     try:
         llm.chat(cfg, [{"role": "user", "content": "ping"}], timeout=15, max_tokens=5)
     except llm.LLMError as e:
         return {"ok": False, "error": f"模型配置不可用：{e}"}
+    # 预检 2：原生 JD 通道就绪（桌面 Chrome 开着并登录 zhipin.com）。
+    # 否则非缓存岗位会逐个走「原生失败→CDP 兜底被反爬→直连失败」全程白烧（2026-09-27 实测教训）
+    ns = _native_channel_status()
+    if not (ns.get("chrome_found") and ns.get("chrome_ready")):
+        return {"ok": False, "error": "原生通道未就绪：" + (ns.get("error") or
+                "未找到打开 zhipin.com 的桌面 Chrome。请先打开 Chrome 登录 BOSS 直聘（窗口不要最小化），再开始批量分析")}
     jobs = [j for j in db.list_jobs() if req.force or not j.get("llm_analysis")]
     if req.limit:
         jobs = jobs[:req.limit]
@@ -542,6 +552,7 @@ def start_analyze_batch(req: AnalyzeBatchReq):
 
 
 def _batch_worker(jobs, cfg):
+    consecutive_fail = 0
     for j in jobs:
         if _batch["stop"]:
             break
@@ -554,10 +565,19 @@ def _batch_worker(jobs, cfg):
             analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, fresh)
             db.save_job_analysis(j["platform"], j["job_id"], analysis)
             _batch["ok"] += 1
+            consecutive_fail = 0
         except Exception as e:
             _batch["failed"] += 1
             if len(_batch["errors"]) < 20:
                 _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {e}"[:160])
+            consecutive_fail += 1
+            if consecutive_fail >= 3:
+                # 连续失败多半是环境问题（Chrome 关了/掉登录/风控），继续烧完只会浪费时间
+                # 还加大风控可见面——熔断并说明原因（2026-09-27：Chrome 未开时空烧 14 个的教训）
+                _batch["errors"].append(
+                    f"已自动停止：连续 {consecutive_fail} 个岗位失败，请检查桌面 Chrome 是否打开并登录 "
+                    f"zhipin.com 后重新开始（剩余 {_batch['total'] - _batch['done'] - 1} 个未处理）"[:160])
+                break
         _batch["done"] += 1
     _batch["running"] = False
     _batch["current"] = ""
@@ -873,6 +893,20 @@ def index():
 
 
 if __name__ == "__main__":
+    import urllib.error
+    import urllib.request
     import uvicorn
     # 只监听本机回环：接口无鉴权且含个人求职数据，不暴露到局域网（2026-09-26）
+    # 防双实例：Windows 下 asyncio 默认 SO_REUSEADDR 允许双绑同一端口，请求会随机落到
+    # 新旧两个进程（2026-09-27 事故：状态与批量线程分家）。启动前先探活
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8080/api/platforms", timeout=2)
+        print("[JobForge] 8080 端口已有 JobForge 实例在运行，本次启动取消。如确需重启，请先结束旧的 server.py 进程。")
+        sys.exit(1)
+    except urllib.error.HTTPError:
+        # 端口有 HTTP 响应（无论什么路径）＝ 已有服务在跑
+        print("[JobForge] 8080 端口已有服务在响应，本次启动取消。")
+        sys.exit(1)
+    except Exception:
+        pass  # 连不上 = 端口空闲，正常启动
     uvicorn.run(app, host="127.0.0.1", port=8080)

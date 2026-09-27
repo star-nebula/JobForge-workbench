@@ -1845,7 +1845,12 @@ let _batchTimer=null;
 document.getElementById('batchAnalyzeBtn').addEventListener('click',async()=>{
   const cfgs=(await _ensureLlmConfigs()).configs||[];
   if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再批量分析');return;}
-  if(!confirm('将为所有还没有 AI 分析结果的岗位逐个：抓取 JD（原生通道，每个约 20~40 秒）+ AI 匹配分析。\n期间会接管键鼠操作 Chrome，请不要最小化浏览器窗口。\n确定开始？'))return;
+  showToast('正在检查原生通道…','确认桌面 Chrome 已打开并登录 zhipin.com');
+  const ns=await(await fetch('/api/native/status')).json().catch(()=>null);
+  if(!ns||!ns.chrome_found||!ns.chrome_ready){
+    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化），再批量分析');return;
+  }
+  if(!confirm('将为所有还没有 AI 分析结果的岗位逐个：抓取 JD + AI 匹配分析（每个约 30~50 秒，期间会接管键鼠操作 Chrome，请不要动鼠标键盘）。\n连续 3 个失败会自动停止。确定开始？'))return;
   try{
     const r=await fetch('/api/analyze-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const d=await r.json();

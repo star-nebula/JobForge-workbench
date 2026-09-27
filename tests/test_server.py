@@ -50,10 +50,23 @@ def test_analyze_batch_preflight_rejects_bad_config(monkeypatch):
     assert r["ok"] is False and "配置不可用" in r["error"]
 
 
+def test_analyze_batch_preflight_rejects_native_not_ready(monkeypatch):
+    """批量启动前必须原生通道就绪（Chrome 开着 zhipin），否则非缓存岗位全失败（2026-09-27 事故回归）。"""
+    monkeypatch.setattr(server, "_get_llm_config",
+                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
+    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
+    monkeypatch.setattr(server, "_native_channel_status",
+                        lambda: {"ok": False, "chrome_found": False, "chrome_ready": False, "error": "未找到 Chrome"})
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["ok"] is False and "原生通道未就绪" in r["error"]
+
+
 def test_analyze_batch_no_jobs_no_start(monkeypatch):
     monkeypatch.setattr(server, "_get_llm_config",
                         lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
     monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
+    monkeypatch.setattr(server, "_native_channel_status",
+                        lambda: {"ok": True, "chrome_found": True, "chrome_ready": True, "throttle_sec": 0})
     monkeypatch.setattr(server.db, "list_jobs", lambda status=None: [])
     r = server.start_analyze_batch(AnalyzeBatchReq())
     assert r["ok"] is True and r["started"] is False
