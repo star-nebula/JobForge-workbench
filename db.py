@@ -68,6 +68,9 @@ def init_db():
         # 完整 JD 正文（岗位详情弹窗展示用；抓一次缓存，避免重复请求触发风控）
         if "jd_text" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN jd_text TEXT")
+        # LLM 匹配分析结果缓存（JSON：verdict/score/strengths/gaps/advice/model）
+        if "llm_analysis" not in cols:
+            c.execute("ALTER TABLE seen_jobs ADD COLUMN llm_analysis TEXT")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_jobs(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_first_seen ON seen_jobs(first_seen_at)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_interview ON seen_jobs(interview_at)")
@@ -119,6 +122,14 @@ def init_db():
                 name TEXT NOT NULL,
                 data TEXT NOT NULL,
                 created_at INTEGER
+            )
+        """)
+        # 应用设置（单行 id=1，data JSON）：当前存放 LLM 模型配置 {configs:[], active_id}
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS app_settings (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL,
+                updated_at INTEGER
             )
         """)
 
@@ -244,6 +255,16 @@ def save_jd(platform: str, job_id: str, jd_text: str) -> bool:
         cur = c.execute(
             "UPDATE seen_jobs SET jd_text=? WHERE platform=? AND job_id=?",
             (jd_text, platform, job_id)
+        )
+        return cur.rowcount > 0
+
+
+def save_job_analysis(platform: str, job_id: str, analysis: Dict) -> bool:
+    """缓存岗位的 LLM 匹配分析结果（JSON）。"""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE seen_jobs SET llm_analysis=? WHERE platform=? AND job_id=?",
+            (json.dumps(analysis, ensure_ascii=False), platform, job_id)
         )
         return cur.rowcount > 0
 
@@ -438,6 +459,31 @@ def delete_resume_version(version_id: int) -> bool:
         return cur.rowcount > 0
 
 
+# ---------- 应用设置（LLM 模型配置等） ----------
+def get_app_settings() -> Dict:
+    """读应用设置（单行 JSON）。无记录返回 {}。"""
+    with _conn() as c:
+        r = c.execute("SELECT data FROM app_settings WHERE id=1").fetchone()
+        if not r:
+            return {}
+        try:
+            return json.loads(r["data"])
+        except Exception:
+            return {}
+
+
+def save_app_settings(data: Dict) -> int:
+    """保存应用设置（全量覆盖）。返回 updated_at。"""
+    now = int(time.time())
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO app_settings (id, data, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (json.dumps(data, ensure_ascii=False), now),
+        )
+    return now
+
+
 def add_scrape_log(platform: str, city: Optional[str], page: int, query_used: str,
                    total: int, new_count: int, source: str, error: str = "") -> int:
     """记录一次智能抓取（含失败）。返回 created_at。"""
@@ -477,4 +523,11 @@ def _row_to_dict(r: sqlite3.Row) -> Dict:
             d["score_detail"] = {}
     else:
         d["score_detail"] = {}
+    if d.get("llm_analysis"):
+        try:
+            d["llm_analysis"] = json.loads(d["llm_analysis"])
+        except Exception:
+            d["llm_analysis"] = None
+    else:
+        d["llm_analysis"] = None
     return d

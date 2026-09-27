@@ -20,15 +20,24 @@ FastAPI + spider.py
   POST /api/profile/versions   当前资料存为命名版本快照
   POST /api/profile/versions/{id}/apply   用版本覆盖当前资料
   DELETE /api/profile/versions/{id}       删除版本
-  POST /api/cover-letter       求职信生成（本地模板，可选关联岗位）
+  GET  /api/llm/configs        AI 模型配置列表（密钥脱敏）
+  PUT  /api/llm/configs        保存模型配置（多模型，掩码密钥自动沿用旧值）
+  POST /api/llm/test           测试某模型配置连通性
+  POST /api/greeting           BOSS 打招呼语生成（LLM，无配置时本地模板降级）
+  POST /api/polish             简历润色（LLM，只改表达不添事实）
+  POST /api/match-analysis     岗位匹配分析（LLM，结果缓存 llm_analysis）
+  POST /api/analyze-batch      批量分析：抓 JD + 分析全部缺分析岗位（后台线程）
+  GET  /api/analyze-batch/status / POST .../stop   批量进度查询 / 停止
   GET  /                       静态页面入口
 """
 import io
 import json
 import os
 import re
+import requests
 import subprocess
 import sys
+import threading
 import time
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,6 +48,7 @@ from typing import Any, Dict, List, Optional
 
 import spider
 import db
+import llm
 import profile_score
 from fetch_jd import clean_jd
 
@@ -139,58 +149,91 @@ def _human_age(sec: int) -> str:
     return f"{sec // 86400} 天前"
 
 
-def _build_cover_letter(pdata: Dict, job: Optional[Dict]) -> str:
-    """求职信模板：全部取自个人资料与岗位真实字段；缺失信息留【】占位，不编造事实。"""
-    def s(k: str) -> str:
-        v = pdata.get(k)
-        return v.strip() if isinstance(v, str) else ""
-    skills = pdata.get("skills") or []
-    if isinstance(skills, str):
-        skills = [x.strip() for x in re.split(r"[，,、；;/\s]+", skills) if x.strip()]
-    skills = [x for x in skills if x]
-    name = s("name") or "【你的姓名】"
-    job = job or {}
-    title = (job.get("title") or "").strip()
-    company = (job.get("company") or "").strip()
-    tags = [str(t).strip() for t in (job.get("tags") or []) if str(t).strip()]
+# ---------- LLM 模型配置（多模型，密钥存本机 SQLite，接口层脱敏） ----------
+def _mask_key(k: str) -> str:
+    return ("****" + k[-4:]) if k and len(k) > 4 else ("****" if k else "")
 
-    lines = ["您好！", ""]
-    if company and title:
-        lines.append(f"我是{name}，从 BOSS 直聘看到贵司「{company} · {title}」岗位与我的方向十分契合，特此投递。")
-    elif title:
-        lines.append(f"我是{name}，看到贵司正在招聘「{title}」岗位，与我的方向十分契合，特此投递。")
+
+def _get_llm_config(model_id=None) -> Optional[Dict]:
+    """取要用的模型配置：指定 model_id 优先，其次设置里的 active，再取第一个。"""
+    llm_cfg = (db.get_app_settings() or {}).get("llm") or {}
+    configs = llm_cfg.get("configs") or []
+    if not configs:
+        return None
+    if model_id is not None:
+        for c in configs:
+            if str(c.get("id")) == str(model_id):
+                return c
+    for c in configs:
+        if str(c.get("id")) == str(llm_cfg.get("active_id")):
+            return c
+    return configs[0]
+
+
+class LLMConfigsReq(BaseModel):
+    configs: List[Dict[str, Any]] = Field(..., description="全量模型配置列表")
+    active_id: Optional[Any] = Field(None, description="当前使用的配置 id")
+
+
+@app.get("/api/llm/configs")
+def get_llm_configs():
+    """模型配置列表（api_key 脱敏为 ****尾4位）。"""
+    llm_cfg = (db.get_app_settings() or {}).get("llm") or {}
+    configs = []
+    for c in (llm_cfg.get("configs") or []):
+        c2 = dict(c)
+        c2["api_key"] = _mask_key(c.get("api_key"))
+        configs.append(c2)
+    return {"configs": configs, "active_id": llm_cfg.get("active_id")}
+
+
+@app.put("/api/llm/configs")
+def put_llm_configs(req: LLMConfigsReq):
+    """保存模型配置。前端回传的掩码密钥（含 ****）自动沿用旧值，不会覆盖真密钥。"""
+    old = {str(c.get("id")): c
+           for c in ((db.get_app_settings() or {}).get("llm") or {}).get("configs") or []}
+    cleaned = []
+    for c in req.configs:
+        c = dict(c)
+        key = str(c.get("api_key") or "")
+        if "****" in key:
+            c["api_key"] = (old.get(str(c.get("id"))) or {}).get("api_key") or ""
+        if not c.get("id"):
+            c["id"] = f"m{int(time.time() * 1000) % 100000000}{len(cleaned)}"
+        cleaned.append({k: c.get(k) for k in ("id", "name", "base_url", "api_key", "model")})
+    settings = db.get_app_settings() or {}
+    settings["llm"] = {"configs": cleaned, "active_id": req.active_id}
+    db.save_app_settings(settings)
+    return {"ok": True}
+
+
+class LLMTestReq(BaseModel):
+    id: Optional[Any] = Field(None, description="已保存配置的 id（与 config 二选一）")
+    config: Optional[Dict[str, Any]] = Field(None, description="未保存的完整配置（表单直测）")
+
+
+@app.post("/api/llm/test")
+def test_llm_config(req: LLMTestReq):
+    """测试连通性：表单直测传 config（真密钥），测已保存配置传 id。"""
+    if req.config:
+        cfg = dict(req.config)
+        # 表单里未改动的已存密钥是掩码 → 用库里真密钥替换再测
+        if "****" in str(cfg.get("api_key") or "") and req.id is not None:
+            cfg["api_key"] = (_get_llm_config(req.id) or {}).get("api_key") or ""
+    elif req.id is not None:
+        cfg = _get_llm_config(req.id)
+        if not cfg:
+            raise HTTPException(status_code=404, detail="配置不存在")
     else:
-        lines.append(f"我是{name}，正在寻找新的职业机会，特此投递简历，期待与您沟通。")
-    lines.append("")
-    if s("summary"):
-        lines.append(s("summary"))
-        lines.append("")
-    if skills:
-        fit = f"，与岗位要求的{'、'.join(tags[:5])}方向吻合" if tags else ""
-        lines.append(f"技能方面，我熟悉{'、'.join(skills[:6])}等{fit}。")
-        lines.append("")
-    if s("experience"):
-        exp = s("experience")
-        lines.append(f"工作经历上：{exp[:120].rstrip()}{'……' if len(exp) > 120 else ''}")
-        lines.append("")
-    wants = []
-    if s("city"):
-        wants.append(f"期望工作地点为{s('city')}")
-    if s("expected_salary"):
-        wants.append(f"期望薪资{s('expected_salary')}")
-    if wants:
-        lines.append("，".join(wants) + "。")
-        lines.append("")
-    lines.append("简历中有更完整的经历与项目信息，期待有机会与您进一步沟通。")
-    lines.append("")
-    lines.append("此致")
-    lines.append("敬礼！")
-    lines.append("")
-    lines.append(name)
-    contact = " · ".join(x for x in [s("phone"), s("email")] if x)
-    if contact:
-        lines.append(contact)
-    return "\n".join(lines)
+        raise HTTPException(status_code=400, detail="需要 id 或 config")
+    t0 = time.time()
+    try:
+        reply = llm.chat(cfg, [{"role": "user", "content": "只回复四个字：连接成功"}],
+                         timeout=30, max_tokens=20)
+    except llm.LLMError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "reply": (reply or "").strip()[:50],
+            "latency_ms": int((time.time() - t0) * 1000), "model": cfg.get("model")}
 
 
 # ---------- CDP Chrome 自动启动 ----------
@@ -396,21 +439,139 @@ def remove_profile_version(version_id: int):
     return {"ok": True, "versions": db.list_resume_versions()}
 
 
-# ---------- 求职信（本地模板生成，零 LLM） ----------
-class CoverLetterReq(BaseModel):
+# ---------- LLM 功能：打招呼语 / 简历润色 / 匹配分析 ----------
+class GreetingReq(BaseModel):
     platform: str = Field("boss")
-    job_id: Optional[str] = Field(None, description="关联岗位（可选；为空生成通用求职信）")
+    job_id: Optional[str] = Field(None, description="关联岗位（可选；为空生成通用招呼语）")
+    model_id: Optional[Any] = Field(None, description="指定模型配置 id，缺省用设置的当前模型")
 
 
-@app.post("/api/cover-letter")
-def create_cover_letter(req: CoverLetterReq):
-    """按个人资料真实信息套模板生成求职信文本。"""
-    p = db.get_profile()
-    pdata = (p or {}).get("data") or {}
+@app.post("/api/greeting")
+def create_greeting(req: GreetingReq):
+    """BOSS 打招呼语：LLM 按岗位 JD 与资料生成；未配置 LLM 时本地模板降级（source=template）。"""
+    pdata = (db.get_profile() or {}).get("data") or {}
     job = db.get_job(req.platform, req.job_id) if req.job_id else None
     if req.job_id and not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return {"ok": True, "letter": _build_cover_letter(pdata, job)}
+    return {"ok": True, **llm.greeting(_get_llm_config(req.model_id), pdata, job)}
+
+
+class PolishReq(BaseModel):
+    summary: Optional[str] = Field(None, description="覆盖资料里的个人简介（不传用已保存值）")
+    experience: Optional[str] = Field(None, description="覆盖资料里的工作经历")
+    model_id: Optional[Any] = None
+
+
+@app.post("/api/polish")
+def polish(req: PolishReq):
+    """润色简历自由文本（summary/experience）：只改表达不添事实，前端 diff 比对后由用户采纳。"""
+    cfg = _get_llm_config(req.model_id)
+    if not cfg:
+        return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
+    pdata = (db.get_profile() or {}).get("data") or {}
+    if req.summary is not None:
+        pdata = {**pdata, "summary": req.summary}
+    if req.experience is not None:
+        pdata = {**pdata, "experience": req.experience}
+    try:
+        r = llm.polish_resume(cfg, pdata)
+    except llm.LLMError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, **r}
+
+
+class AnalyzeReq(BaseModel):
+    platform: str = Field("boss")
+    job_id: str = Field(..., min_length=1)
+    refresh: bool = Field(False, description="true=忽略缓存重新分析")
+    model_id: Optional[Any] = None
+
+
+@app.post("/api/match-analysis")
+def match_analysis(req: AnalyzeReq):
+    """岗位匹配分析（LLM）。结果缓存到 seen_jobs.llm_analysis；需已有 JD 缓存。"""
+    job = db.get_job(req.platform, req.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.get("llm_analysis") and not req.refresh:
+        return {"ok": True, "cached": True, "analysis": job["llm_analysis"]}
+    cfg = _get_llm_config(req.model_id)
+    if not cfg:
+        return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
+    try:
+        analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, job)
+    except llm.LLMError as e:
+        return {"ok": False, "error": str(e)}
+    db.save_job_analysis(req.platform, req.job_id, analysis)
+    return {"ok": True, "cached": False, "analysis": analysis}
+
+
+# ---------- 批量分析：抓 JD + 逐个 LLM 分析（后台线程，前端轮询进度） ----------
+class AnalyzeBatchReq(BaseModel):
+    limit: Optional[int] = Field(None, ge=1, description="最多处理多少个岗位，缺省全部")
+    force: bool = Field(False, description="true=已分析的也重新分析")
+    model_id: Optional[Any] = None
+
+
+_batch = {"running": False, "stop": False, "total": 0, "done": 0,
+          "ok": 0, "failed": 0, "current": "", "errors": []}
+
+
+@app.post("/api/analyze-batch")
+def start_analyze_batch(req: AnalyzeBatchReq):
+    """开始批量分析。每个岗位先确保 JD（无缓存走原生抓取通道，约 20~40s/个），再 LLM 分析。"""
+    if _batch["running"]:
+        return {"ok": False, "error": "批量分析已在进行中"}
+    cfg = _get_llm_config(req.model_id)
+    if not cfg:
+        return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
+    # 预检：先 ping 一次模型。批量一跑几十个岗位、每个几十秒，配置不可用必须当场拦下
+    try:
+        llm.chat(cfg, [{"role": "user", "content": "ping"}], timeout=15, max_tokens=5)
+    except llm.LLMError as e:
+        return {"ok": False, "error": f"模型配置不可用：{e}"}
+    jobs = [j for j in db.list_jobs() if req.force or not j.get("llm_analysis")]
+    if req.limit:
+        jobs = jobs[:req.limit]
+    if not jobs:
+        return {"ok": True, "started": False, "message": "没有需要分析的岗位（已有分析的可用「强制重分析」）"}
+    _batch.update({"running": True, "stop": False, "total": len(jobs), "done": 0,
+                   "ok": 0, "failed": 0, "current": "", "errors": []})
+    threading.Thread(target=_batch_worker, args=(jobs, cfg), daemon=True).start()
+    return {"ok": True, "started": True, "total": len(jobs)}
+
+
+def _batch_worker(jobs, cfg):
+    for j in jobs:
+        if _batch["stop"]:
+            break
+        _batch["current"] = f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}"
+        try:
+            jd_res = _fetch_jd_core(j, refresh=False)
+            if not jd_res.get("ok"):
+                raise llm.LLMError(jd_res.get("error") or "JD 抓取失败")
+            fresh = db.get_job(j["platform"], j["job_id"]) or j
+            analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, fresh)
+            db.save_job_analysis(j["platform"], j["job_id"], analysis)
+            _batch["ok"] += 1
+        except Exception as e:
+            _batch["failed"] += 1
+            if len(_batch["errors"]) < 20:
+                _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {e}"[:160])
+        _batch["done"] += 1
+    _batch["running"] = False
+    _batch["current"] = ""
+
+
+@app.get("/api/analyze-batch/status")
+def analyze_batch_status():
+    return {**_batch}
+
+
+@app.post("/api/analyze-batch/stop")
+def analyze_batch_stop():
+    _batch["stop"] = True
+    return {"ok": True}
 
 
 @app.post("/api/crawl")
@@ -582,11 +743,17 @@ def get_seen_job(platform: str, job_id: str):
 
 @app.get("/api/jobs/{platform}/{job_id}/jd")
 def get_job_jd(platform: str, job_id: str, refresh: bool = False):
-    """岗位完整 JD 正文：优先读库缓存，无缓存（或 refresh=1）则带 cookie 抓详情页解析并入库。
-    页面结构变化或被风控时返回 error，前端回退到已存字段 + 原始链接。"""
+    """岗位完整 JD 正文：优先读库缓存，无缓存（或 refresh=1）则抓详情页解析并入库。"""
     job = db.get_job(platform, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
+    return _fetch_jd_core(job, refresh)
+
+
+def _fetch_jd_core(job: Dict, refresh: bool = False) -> Dict:
+    """确保岗位有 JD：缓存直读（历史脏缓存出口兜底清洗并写回），缺失则
+    原生通道 → CDP 兜底 → requests 直连三层降级。详情弹窗与批量分析共用。"""
+    platform, job_id = job["platform"], job["job_id"]
     if job.get("jd_text") and not refresh:
         # 历史缓存可能含招聘者卡/公司介绍等冗余块（清洗上线前入库），出口兜底
         # 清洗一次并写回，之后即为纯缓存直读
@@ -640,23 +807,21 @@ def get_job_jd(platform: str, job_id: str, refresh: bool = False):
                 fetch_err = f"{fetch_err}；且无法启动调试浏览器：{note}"
 
         # 兜底：requests 直连详情页 HTML（可能被「请稍候」挑战拦截）
-        import re as _re
-        import requests as _rq
         cookies = spider._load_cookies("boss")
         headers = {**spider.HEADERS, "Referer": "https://www.zhipin.com/"}
-        resp = _rq.get(job["url"], headers=headers, cookies=cookies, timeout=10)
+        resp = requests.get(job["url"], headers=headers, cookies=cookies, timeout=10)
         resp.encoding = resp.apparent_encoding or "utf-8"
         html = resp.text
 
         def _strip_tags(s: str) -> str:
-            s = _re.sub(r"<br\s*/?>", "\n", s)
-            s = _re.sub(r"<[^>]+>", "", s)
-            return _re.sub(r"\n{3,}", "\n\n", s.strip())
+            s = re.sub(r"<br\s*/?>", "\n", s)
+            s = re.sub(r"<[^>]+>", "", s)
+            return re.sub(r"\n{3,}", "\n\n", s.strip())
 
         # BOSS 详情页结构：<h3>小节标题</h3><div class="job-sec-text">正文</div>
-        sections = _re.findall(
+        sections = re.findall(
             r"<h3[^>]*>([^<]{1,30})</h3>\s*<div[^>]*class=\"[^\"]*job-sec-text[^\"]*\"[^>]*>(.*?)</div>",
-            html, _re.S)
+            html, re.S)
         jd = ""
         for sec_title, body in sections:
             t = sec_title.strip()

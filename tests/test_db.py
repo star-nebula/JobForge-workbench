@@ -88,3 +88,18 @@ def test_scrape_log(tmp_db):
     logs = tmp_db.list_scrape_logs()
     assert len(logs) == 2
     assert logs[0]["source"] == "error" and logs[0]["error"] == "风控"   # 倒序
+
+
+def test_app_settings_roundtrip(tmp_db):
+    assert tmp_db.get_app_settings() == {}
+    tmp_db.save_app_settings({"llm": {"configs": [{"id": "a", "model": "m"}], "active_id": "a"}})
+    s = tmp_db.get_app_settings()
+    assert s["llm"]["active_id"] == "a" and s["llm"]["configs"][0]["model"] == "m"
+
+
+def test_job_analysis_cache(tmp_db):
+    tmp_db.upsert_jobs([_job()])
+    assert tmp_db.get_job("boss", "abc123")["llm_analysis"] is None
+    assert tmp_db.save_job_analysis("boss", "abc123", {"verdict": "匹配", "score": 66}) is True
+    assert tmp_db.get_job("boss", "abc123")["llm_analysis"]["score"] == 66
+    assert tmp_db.save_job_analysis("boss", "nope", {}) is False

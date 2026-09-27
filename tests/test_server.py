@@ -1,31 +1,59 @@
-"""求职信模板 _build_cover_letter 测试（经 server 导入；零 LLM、不编造事实）。"""
-from server import _build_cover_letter
+"""server 层纯函数测试：密钥脱敏 + 模型配置选型 + 批量分析预检（db/llm mock，不碰真实库）。"""
+import pytest
+
+import llm
+import server
+from server import AnalyzeBatchReq, _get_llm_config, _mask_key
 
 
-def test_letter_with_job():
-    pdata = {
-        "name": "张三", "phone": "13800138000", "email": "z@x.com",
-        "target_position": "前端", "city": "上海", "expected_salary": "30-50K",
-        "skills": ["React", "TypeScript", "Vue"],
-        "summary": "五年前端经验。",
-        "experience": "负责核心页面重构，性能提升 40%。",
-    }
-    job = {"title": "高级前端工程师", "company": "某公司", "tags": ["React", "TypeScript"]}
-    letter = _build_cover_letter(pdata, job)
-    assert "某公司 · 高级前端工程师" in letter
-    assert "张三" in letter
-    assert "React、TypeScript、Vue" in letter
-    assert "期望工作地点为上海" in letter
-    assert "13800138000 · z@x.com" in letter
+def test_mask_key():
+    assert _mask_key("sk-abcdef123456") == "****3456"
+    assert _mask_key("abc") == "****"
+    assert _mask_key("") == ""
 
 
-def test_letter_generic_without_job():
-    letter = _build_cover_letter({"name": "张三"}, None)
-    assert "寻找新的职业机会" in letter
-    assert "【你的姓名】" not in letter
+@pytest.fixture
+def llm_settings(monkeypatch):
+    configs = [
+        {"id": "a", "name": "DeepSeek", "base_url": "https://x/v1", "model": "m1", "api_key": "k1"},
+        {"id": "b", "name": "Qwen", "base_url": "https://y/v1", "model": "m2", "api_key": "k2"},
+    ]
+    monkeypatch.setattr(server.db, "get_app_settings",
+                        lambda: {"llm": {"configs": configs, "active_id": "b"}})
+    return configs
 
 
-def test_letter_missing_fields_use_placeholders_not_fabrication():
-    letter = _build_cover_letter({}, None)
-    assert "【你的姓名】" in letter
-    assert "上海" not in letter and "30-50K" not in letter
+def test_get_llm_config_active_first(llm_settings):
+    assert _get_llm_config()["id"] == "b"
+
+
+def test_get_llm_config_explicit_id(llm_settings):
+    assert _get_llm_config("a")["id"] == "a"
+
+
+def test_get_llm_config_unknown_id_falls_back_to_active(llm_settings):
+    assert _get_llm_config("不存在的")["id"] == "b"
+
+
+def test_get_llm_config_empty(monkeypatch):
+    monkeypatch.setattr(server.db, "get_app_settings", lambda: {})
+    assert _get_llm_config() is None
+
+
+def test_analyze_batch_preflight_rejects_bad_config(monkeypatch):
+    """批量启动前必须 ping 通模型，配置不可用当场拦下（2026-09-26 假配置空转事故的回归）。"""
+    monkeypatch.setattr(server, "_get_llm_config",
+                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
+    monkeypatch.setattr(server.llm, "chat",
+                        lambda *a, **k: (_ for _ in ()).throw(llm.LLMError("HTTP 401")))
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["ok"] is False and "配置不可用" in r["error"]
+
+
+def test_analyze_batch_no_jobs_no_start(monkeypatch):
+    monkeypatch.setattr(server, "_get_llm_config",
+                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
+    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
+    monkeypatch.setattr(server.db, "list_jobs", lambda status=None: [])
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["ok"] is True and r["started"] is False

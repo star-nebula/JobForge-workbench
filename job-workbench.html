@@ -562,7 +562,7 @@
         <button class="icon-btn" title="通知">
           <svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
         </button>
-        <button class="icon-btn" title="设置">
+        <button class="icon-btn" id="settingsBtn" title="AI 模型设置">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         </button>
       </div>
@@ -678,7 +678,7 @@
                 <button class="tb-btn">•</button>
                 <button class="tb-btn">↳</button>
                 <div class="tb-sep"></div>
-                <button class="tb-btn" title="AI 优化">✨</button>
+                <button class="tb-btn" id="polishTriggerBtn" title="AI 润色（简介+经历，diff 比对后采纳）">✨</button>
                 <button class="tb-btn" title="岗位适配">🎯</button>
                 <div style="margin-left:auto;font-size:12px;color:var(--text-3)">只读预览 · 随个人资料更新</div>
               </div>
@@ -728,15 +728,8 @@
               </div>
             </div>
 
-            <!-- 一键操作（2026-09-26 真化：匹配分析引导 / 求职信模板生成；AI 润色待 LLM 后端立项） -->
-            <div class="panel">
-              <div class="panel-title" style="margin-bottom:12px">一键操作</div>
-              <div style="display:flex;flex-direction:column;gap:8px">
-                <button class="btn" id="gotoMatchBtn" style="justify-content:flex-start"><span style="color:var(--accent)">🎯</span> 岗位匹配分析<span style="margin-left:auto;font-size:10.5px;color:var(--text-3)">在岗位详情弹窗内</span></button>
-                <button class="btn" id="coverLetterBtn" style="justify-content:flex-start"><span style="color:var(--blue)">📋</span> 生成求职信</button>
-                <button class="btn" disabled title="需接入 LLM 后端，待立项" style="justify-content:flex-start;opacity:.45;cursor:not-allowed"><span style="color:var(--green)">✨</span> AI 润色整份简历<span style="margin-left:auto;font-size:10.5px;color:var(--text-3)">待接入 LLM</span></button>
-              </div>
-            </div>
+            <!-- 一键操作面板已移除（2026-09-26 用户反馈）：匹配分析→岗位详情弹窗自动运行+岗位市场批量；
+                 打招呼语→岗位详情弹窗（LLM）；AI 润色→简历预览工具栏 ✨（LLM+diff 比对） -->
 
           </div>
         </div>
@@ -745,7 +738,11 @@
       <div class="view" id="jobs">
         <div class="view-header">
           <div class="view-title">岗位市场 <small>已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small></div>
-          <button class="btn" id="refreshJobsBtn"><svg viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-3.5-7.1L21 8"/><path d="M21 3v5h-5"/></svg>刷新</button>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span id="batchChip" style="display:none;font-size:12px;color:var(--accent);background:rgba(255,122,24,.12);padding:4px 10px;border-radius:6px;cursor:pointer" title="点击停止批量分析"></span>
+            <button class="btn" id="batchAnalyzeBtn" title="为没有分析结果的岗位逐个抓取 JD 并做 AI 匹配分析（每个约 30~50 秒）">🤖 AI 分析</button>
+            <button class="btn" id="refreshJobsBtn"><svg viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-3.5-7.1L21 8"/><path d="M21 3v5h-5"/></svg>刷新</button>
+          </div>
         </div>
         <div class="job-list" id="jobList">
           <div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-3)">
@@ -903,28 +900,57 @@
   </div>
 </div>
 
-<!-- 求职信生成小窗（本地模板，可选关联岗位） -->
-<div id="letterModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:205;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
-  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(640px,94vw);max-height:80vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
+<!-- AI 模型设置（topbar ⚙ 唤起）：多模型配置，OpenAI 兼容协议，密钥仅存本机 -->
+<div id="llmModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:220;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(560px,94vw);max-height:82vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
     <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center">
-      <div style="font-size:15px;font-weight:700">📋 生成求职信</div>
+      <div style="font-size:15px;font-weight:700">⚙ AI 模型设置</div>
       <div style="flex:1"></div>
-      <button class="btn" id="letterModalClose" style="padding:6px 11px" title="关闭">✕</button>
-    </div>
-    <div style="padding:12px 18px 0;display:flex;gap:8px;align-items:end">
-      <div style="flex:1">
-        <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">关联岗位（可选）· 模板按个人资料真实信息生成，可直接修改</div>
-        <select id="letterJob" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:9px;border-radius:8px;font-size:13px">
-          <option value="">不关联岗位（通用求职信）</option>
-        </select>
-      </div>
-      <button class="btn primary" id="letterGenBtn" style="padding:9px 14px">生成</button>
+      <button class="btn" id="llmModalClose" style="padding:6px 11px" title="关闭">✕</button>
     </div>
     <div style="flex:1;overflow-y:auto;padding:12px 18px">
-      <textarea id="letterText" style="width:100%;min-height:260px;background:var(--bg-3);border:1px solid var(--border);border-radius:10px;padding:12px;color:var(--text);font-size:13px;line-height:1.7;resize:vertical;font-family:inherit" placeholder="点击「生成」按模板生成求职信，生成后可在此直接修改"></textarea>
+      <div id="llmList"></div>
+      <div id="llmForm" style="display:none;border:1px solid var(--border);border-radius:10px;padding:12px;margin-top:4px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div><div style="font-size:12px;color:var(--text-3);margin-bottom:5px">名称（自己辨识用）</div><input id="lf_name" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px" placeholder="如 DeepSeek / 通义 / 本地 Ollama"></div>
+          <div><div style="font-size:12px;color:var(--text-3);margin-bottom:5px">模型名</div><input id="lf_model" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px" placeholder="如 deepseek-chat"></div>
+          <div><div style="font-size:12px;color:var(--text-3);margin-bottom:5px">Base URL（OpenAI 兼容，到 /v1）</div><input id="lf_base" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px" placeholder="https://api.deepseek.com/v1"></div>
+          <div><div style="font-size:12px;color:var(--text-3);margin-bottom:5px">API Key（仅存本机）</div><input id="lf_key" type="password" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px" placeholder="sk-…"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;justify-content:flex-end">
+          <button class="btn" id="lf_test">测试连接</button>
+          <button class="btn" id="lf_cancel">取消</button>
+          <button class="btn primary" id="lf_save">保存配置</button>
+        </div>
+        <div id="lf_testResult" style="font-size:12px;margin-top:8px;color:var(--text-3)"></div>
+      </div>
     </div>
-    <div style="padding:10px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
-      <button class="btn" id="letterCopyBtn">复制全文</button>
+    <div style="padding:10px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      <button class="btn primary" id="llmAddBtn" style="padding:7px 14px">＋ 新增模型</button>
+      <div style="flex:1;font-size:11.5px;color:var(--text-3)">兼容 OpenAI Chat 协议：DeepSeek / 通义 / 智谱 / Moonshot / Ollama 等；Base URL 填到 /v1。点名称左侧圆点选用哪个模型；密钥只存本机数据库，不会上传或入库 git。</div>
+    </div>
+  </div>
+</div>
+
+<!-- AI 简历润色（简历预览工具栏 ✨ 唤起）：润色 → 行级 diff 比对 → 采纳写回 -->
+<div id="polishModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:220;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(720px,94vw);max-height:84vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);overflow:hidden">
+    <div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px">
+      <div style="font-size:15px;font-weight:700">✨ AI 润色简历</div>
+      <div style="font-size:11.5px;color:var(--text-3)">只改表达不添事实 · 润色「个人简介」与「工作经历」</div>
+      <div style="flex:1"></div>
+      <button class="btn" id="polishModalClose" style="padding:6px 11px" title="关闭">✕</button>
+    </div>
+    <div style="padding:12px 18px 0;display:flex;gap:8px;align-items:center">
+      <select id="polishModel" style="background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px;border-radius:8px;font-size:13px;min-width:200px"></select>
+      <button class="btn primary" id="polishRunBtn">开始润色</button>
+      <div style="flex:1"></div>
+      <button class="btn" id="polishBackupBtn" title="把当前资料存为版本，润色不满意可随时切回">先备份当前为版本</button>
+    </div>
+    <div id="polishDiff" style="flex:1;overflow-y:auto;padding:12px 18px;display:none"></div>
+    <div style="padding:10px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" id="polishCancelBtn">关闭</button>
+      <button class="btn primary" id="polishApplyBtn" disabled>采纳并保存</button>
     </div>
   </div>
 </div>
@@ -1605,43 +1631,255 @@ document.getElementById('versionsList').addEventListener('click',async e=>{
   }
 });
 
-// ===== 一键操作（匹配分析引导 / 求职信模板） =====
-document.getElementById('gotoMatchBtn').addEventListener('click',()=>{
-  const nav=document.querySelector('.nav-item[data-view="jobs"]');
-  if(nav)nav.click();
-  showToast('岗位匹配分析','在岗位市场点开任意岗位，详情弹窗内有「技能对照」');
+// ===== AI 模型设置（topbar ⚙）：多模型配置 CRUD + 测试连接 =====
+document.getElementById('settingsBtn').addEventListener('click',async()=>{
+  document.getElementById('llmModal').style.display='flex';
+  await _ensureLlmConfigs();
+  _llmCache=null; await _ensureLlmConfigs();   // 打开时强制刷新（密钥掩码最新）
+  _renderLlmList();
 });
-document.getElementById('coverLetterBtn').addEventListener('click',async()=>{
-  document.getElementById('letterModal').style.display='flex';
-  const sel=document.getElementById('letterJob');
-  sel.innerHTML='<option value="">不关联岗位（通用求职信）</option>';
+document.getElementById('llmModalClose').addEventListener('click',()=>document.getElementById('llmModal').style.display='none');
+document.getElementById('llmModal').addEventListener('click',e=>{if(e.target.id==='llmModal')e.target.style.display='none'});
+let _llmEditing=null;   // null=列表态 | {}=新增 | {…config}=编辑
+function _renderLlmList(){
+  const list=document.getElementById('llmList');
+  const form=document.getElementById('llmForm');
+  if(_llmEditing!==null){form.style.display='';list.style.opacity='.45';return;}
+  form.style.display='none';list.style.opacity='';
+  const cs=_llmCache.configs||[];
+  if(!cs.length){
+    list.innerHTML='<div style="text-align:center;padding:24px 8px;color:var(--text-3);font-size:12.5px">还没有配置模型。<br>新增一个 OpenAI 兼容服务（DeepSeek / 通义 / 智谱 / 本地 Ollama 均可），即可使用打招呼语、匹配分析、简历润色。</div>';
+    return;
+  }
+  list.innerHTML=cs.map(c=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;margin-bottom:8px">
+      <span title="${_llmCache.active_id===c.id?'当前使用':'点选为当前使用'}" data-llmactive="${c.id}" style="width:14px;height:14px;border-radius:50%;flex-shrink:0;cursor:pointer;border:2px solid ${_llmCache.active_id===c.id?'var(--accent)':'var(--border)'};background:${_llmCache.active_id===c.id?'var(--accent)':'transparent'}"></span>
+      <div style="min-width:0;flex:1">
+        <div style="font-size:13px;font-weight:600">${_escHtml(c.name||'(未命名)')} <span style="font-weight:400;color:var(--text-3);font-size:11.5px">· ${_escHtml(c.model||'')}</span>${_llmCache.active_id===c.id?'<span style="font-size:10px;color:var(--accent);margin-left:6px">使用中</span>':''}</div>
+        <div style="font-size:11px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_escHtml(c.base_url||'')}</div>
+      </div>
+      <button class="btn" data-llmtest="${c.id}" style="padding:5px 10px;font-size:11.5px">测试</button>
+      <button class="btn" data-llm-edit="${c.id}" style="padding:5px 10px;font-size:11.5px">编辑</button>
+      <button class="btn" data-llm-del="${c.id}" style="padding:5px 10px;font-size:11.5px;color:var(--red)">删除</button>
+      <span data-llm-testresult="${c.id}" style="font-size:11px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    </div>`).join('');
+}
+function _llmFormShow(cfg){
+  _llmEditing=cfg?{...cfg}:{id:null,name:'',base_url:'',api_key:'',model:''};
+  document.getElementById('lf_name').value=_llmEditing.name||'';
+  document.getElementById('lf_model').value=_llmEditing.model||'';
+  document.getElementById('lf_base').value=_llmEditing.base_url||'';
+  document.getElementById('lf_key').value=_llmEditing.api_key||'';
+  document.getElementById('lf_testResult').textContent='';
+  _renderLlmList();
+}
+document.getElementById('llmAddBtn').addEventListener('click',()=>_llmFormShow(null));
+document.getElementById('lf_cancel').addEventListener('click',()=>{_llmEditing=null;_renderLlmList();});
+function _llmFormValues(){
+  return {id:_llmEditing?_llmEditing.id:null,
+          name:document.getElementById('lf_name').value.trim(),
+          model:document.getElementById('lf_model').value.trim(),
+          base_url:document.getElementById('lf_base').value.trim(),
+          api_key:document.getElementById('lf_key').value.trim()};
+}
+document.getElementById('lf_test').addEventListener('click',async()=>{
+  const cfg=_llmFormValues();
+  if(!cfg.base_url||!cfg.model){document.getElementById('lf_testResult').textContent='先填 Base URL 与模型名';return;}
+  const el=document.getElementById('lf_testResult');
+  el.textContent='测试中…';
   try{
-    const r=await fetch('/api/jobs');
-    const jobs=(await r.json()).jobs||[];
-    sel.innerHTML+='<option value="" disabled>—— 关联岗位市场岗位 ——</option>'+
-      jobs.slice(0,50).map(j=>`<option value="${_escHtml(j.platform)}|${_escHtml(String(j.job_id))}">${_escHtml((j.title||'(无标题)')+' · '+(j.company||''))}</option>`).join('');
-  }catch(e){}
-});
-document.getElementById('letterModalClose').addEventListener('click',()=>document.getElementById('letterModal').style.display='none');
-document.getElementById('letterModal').addEventListener('click',e=>{if(e.target.id==='letterModal')e.target.style.display='none'});
-document.getElementById('letterGenBtn').addEventListener('click',async()=>{
-  const sel=document.getElementById('letterJob').value||'';
-  const [platform,jobId]=sel?sel.split('|'):['',''];
-  const btn=document.getElementById('letterGenBtn');
-  btn.disabled=true;btn.textContent='生成中…';
-  try{
-    const r=await fetch('/api/cover-letter',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({platform:platform||'boss',job_id:jobId||null})});
+    const r=await fetch('/api/llm/test',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:cfg.id,config:cfg})});
     const d=await r.json();
-    if(!r.ok)throw new Error(d.detail||'生成失败');
-    document.getElementById('letterText').value=d.letter||'';
-  }catch(e){showToast('生成失败',e.message);}
-  finally{btn.disabled=false;btn.textContent='生成';}
+    el.innerHTML=d.ok?`<span style="color:var(--green)">✓ 连接成功（${d.latency_ms}ms · ${_escHtml(d.model)}）</span>`:`<span style="color:var(--red)">✕ ${_escHtml(d.error||'失败')}</span>`;
+  }catch(e){el.innerHTML=`<span style="color:var(--red)">✕ ${_escHtml(e.message)}</span>`;}
 });
-document.getElementById('letterCopyBtn').addEventListener('click',async()=>{
-  const t=document.getElementById('letterText').value.trim();
-  if(!t){showToast('还没有内容','先点「生成」再复制');return;}
-  try{await navigator.clipboard.writeText(t);showToast('已复制','求职信全文已复制到剪贴板');}
-  catch(e){document.getElementById('letterText').select();document.execCommand('copy');showToast('已复制','求职信全文已复制到剪贴板');}
+document.getElementById('lf_save').addEventListener('click',async()=>{
+  const cfg=_llmFormValues();
+  if(!cfg.name||!cfg.base_url||!cfg.model){showToast('信息不全','名称 / Base URL / 模型名 必填');return;}
+  const configs=(_llmCache.configs||[]).map(c=>c.id===cfg.id?{...c,...cfg}:c);
+  if(cfg.id===null){cfg.id='new';configs.push({...cfg});}
+  try{
+    const r=await fetch('/api/llm/configs',{method:'PUT',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({configs,active_id:_llmCache.active_id||(cfg.id==='new'?null:_llmCache.active_id)})});
+    if(!r.ok)throw new Error('保存失败');
+    _llmCache=null;await _ensureLlmConfigs();
+    _llmEditing=null;_renderLlmList();
+    showToast('已保存',`模型「${cfg.name}」${cfg.id==='new'?'已添加':'已更新'}`);
+  }catch(e){showToast('保存失败',e.message);}
+});
+document.getElementById('llmList').addEventListener('click',async e=>{
+  const act=e.target.closest('[data-llmactive]'), ed=e.target.closest('[data-llm-edit]'),
+        del=e.target.closest('[data-llm-del]'), test=e.target.closest('[data-llmtest]');
+  if(act){
+    try{
+      const r=await fetch('/api/llm/configs',{method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({configs:_llmCache.configs,active_id:act.dataset.llmactive})});
+      if(!r.ok)throw new Error('切换失败');
+      _llmCache=null;await _ensureLlmConfigs();_renderLlmList();
+    }catch(err){showToast('切换失败',err.message);}
+  }else if(ed){
+    const c=(_llmCache.configs||[]).find(x=>String(x.id)===String(ed.dataset.llmEdit));
+    if(c)_llmFormShow(c);
+  }else if(del){
+    if(!confirm('确认删除该模型配置？'))return;
+    const configs=(_llmCache.configs||[]).filter(x=>String(x.id)!==String(del.dataset.llmDel));
+    try{
+      const r=await fetch('/api/llm/configs',{method:'PUT',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({configs,active_id:_llmCache.active_id})});
+      if(!r.ok)throw new Error('删除失败');
+      _llmCache=null;await _ensureLlmConfigs();_renderLlmList();
+    }catch(err){showToast('删除失败',err.message);}
+  }else if(test){
+    const out=document.querySelector(`[data-llm-testresult="${test.dataset.llmtest}"]`);
+    if(out)out.textContent='测试中…';
+    try{
+      const r=await fetch('/api/llm/test',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:test.dataset.llmtest})});
+      const d=await r.json();
+      if(out)out.innerHTML=d.ok?`<span style="color:var(--green)">✓ ${d.latency_ms}ms</span>`:`<span style="color:var(--red)" title="${_escHtml(d.error||'')}">✕ ${_escHtml((d.error||'失败').slice(0,40))}</span>`;
+    }catch(err){if(out)out.textContent='✕ '+err.message;}
+  }
+});
+
+// ===== AI 简历润色（简历预览工具栏 ✨）：LLM 润色 → 行级 diff → 采纳写回 =====
+function _lineDiff(oldText,newText){
+  const a=(oldText||'').split('\n'),b=(newText||'').split('\n');
+  const n=a.length,m=b.length;
+  const dp=Array.from({length:n+1},()=>new Array(m+1).fill(0));
+  for(let i=n-1;i>=0;i--)for(let j=m-1;j>=0;j--)
+    dp[i][j]=a[i]===b[j]?dp[i+1][j+1]+1:Math.max(dp[i+1][j],dp[i][j+1]);
+  const rows=[];let i=0,j=0;
+  while(i<n&&j<m){
+    if(a[i]===b[j]){rows.push({t:' ',s:a[i]});i++;j++;}
+    else if(dp[i+1][j]>=dp[i][j+1]){rows.push({t:'-',s:a[i]});i++;}
+    else{rows.push({t:'+',s:b[j]});j++;}
+  }
+  while(i<n)rows.push({t:'-',s:a[i++]});
+  while(j<m)rows.push({t:'+',s:b[j++]});
+  return rows;
+}
+function _diffBlock(title,oldText,newText){
+  if((oldText||'').trim()===(newText||'').trim())
+    return `<div style="margin-bottom:12px"><div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:5px">${title} <span style="font-weight:400;color:var(--green)">· 无变化</span></div></div>`;
+  const bg=t=>t==='+'?'rgba(34,197,94,.10)':t==='-'?'rgba(239,68,68,.08)':'transparent';
+  const mark=t=>t==='+'?'+ ':t==='-'?'− ':'  ';
+  const col=t=>t==='+'?'var(--green)':t==='-'?'var(--red)':'var(--text-3)';
+  const rows=_lineDiff(oldText,newText).map(r=>r.t===' '?'':`<div style="background:${bg(r.t)};padding:1px 8px;border-radius:4px;font-size:12.5px;line-height:1.7;white-space:pre-wrap;color:${col(r.t)}">${mark(r.t)}${_escHtml(r.s)||'（空行）'}</div>`).join('');
+  return `<div style="margin-bottom:14px">
+    <div style="font-size:12px;font-weight:600;color:var(--text-3);margin-bottom:5px">${title} <span style="font-weight:400">· <span style="color:var(--red)">− 旧版</span> / <span style="color:var(--green)">+ 润色后</span></span></div>
+    <div style="border:1px solid var(--border);border-radius:8px;padding:6px;background:var(--bg-2)">${rows}</div>
+  </div>`;
+}
+let _pendingPolish=null;   // {summary, experience, model}
+document.getElementById('polishTriggerBtn').addEventListener('click',async()=>{
+  if(!_pHasData()){showToast('还没有个人资料','先填写或采纳资料，再润色');return;}
+  if(!currentProfile.data.summary&&!currentProfile.data.experience){
+    showToast('没有可润色的内容','个人简介与工作经历都为空');return;
+  }
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加一个模型后即可润色');return;}
+  const sel=document.getElementById('polishModel');
+  sel.innerHTML=cfgs.map(c=>`<option value="${_escHtml(String(c.id))}">${_escHtml((c.name||c.model)+'（'+(c.model||'')+'）')}</option>`).join('');
+  const active=cfgs.find(c=>String(c.id)===String(_llmCache.active_id))||cfgs[0];
+  sel.value=String(active.id);
+  _pendingPolish=null;
+  document.getElementById('polishDiff').style.display='none';
+  document.getElementById('polishApplyBtn').disabled=true;
+  document.getElementById('polishModal').style.display='flex';
+});
+document.getElementById('polishModalClose').addEventListener('click',()=>document.getElementById('polishModal').style.display='none');
+document.getElementById('polishCancelBtn').addEventListener('click',()=>document.getElementById('polishModal').style.display='none');
+document.getElementById('polishModal').addEventListener('click',e=>{if(e.target.id==='polishModal')e.target.style.display='none'});
+document.getElementById('polishRunBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('polishRunBtn');
+  btn.disabled=true;btn.textContent='润色中…';
+  try{
+    const r=await fetch('/api/polish',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model_id:document.getElementById('polishModel').value||null,
+                           summary:currentProfile.data.summary||'',
+                           experience:currentProfile.data.experience||''})});
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'润色失败');
+    _pendingPolish={summary:d.summary,experience:d.experience,model:d.model};
+    const oldS=currentProfile.data.summary||'', oldE=currentProfile.data.experience||'';
+    const diff=document.getElementById('polishDiff');
+    diff.innerHTML=_diffBlock('个人简介',oldS,d.summary)+_diffBlock('工作经历',oldE,d.experience)+
+      `<div style="font-size:11.5px;color:var(--text-3)">由 ${_escHtml(d.model||'AI')} 润色 · 绿色为润色后新增表达，红色为被替换的旧表达；确认无误再采纳</div>`;
+    diff.style.display='';
+    document.getElementById('polishApplyBtn').disabled=false;
+    if(oldS.trim()===d.summary.trim()&&oldE.trim()===d.experience.trim()){
+      diff.innerHTML='<div style="text-align:center;padding:20px;color:var(--text-3);font-size:13px">模型认为当前表达已经很好，没有需要修改的地方</div>';
+      document.getElementById('polishApplyBtn').disabled=true;
+    }
+  }catch(e){showToast('润色失败',e.message);}
+  finally{btn.disabled=false;btn.textContent='开始润色';}
+});
+document.getElementById('polishBackupBtn').addEventListener('click',async()=>{
+  const name=(prompt('备份版本名称（如：润色前备份）：','润色前备份')||'').trim();
+  if(!name)return;
+  try{
+    const r=await fetch('/api/profile/versions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    if(!r.ok)throw new Error('备份失败');
+    showToast('已备份',`当前资料已存为版本「${name}」`);refreshVersions();
+  }catch(e){showToast('备份失败',e.message);}
+});
+document.getElementById('polishApplyBtn').addEventListener('click',async()=>{
+  if(!_pendingPolish)return;
+  const data={...currentProfile.data};
+  if(_pendingPolish.summary)data.summary=_pendingPolish.summary;
+  if(_pendingPolish.experience)data.experience=_pendingPolish.experience;
+  try{
+    const r=await fetch('/api/profile',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({data})});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.detail||'保存失败');
+    currentProfile={data,updated_at:d.updated_at};
+    renderProfileCard();renderResumePreview();refreshScore();
+    document.getElementById('polishModal').style.display='none';
+    showToast('润色已采纳','个人简介 / 工作经历已更新，简历预览同步刷新');
+  }catch(e){showToast('保存失败',e.message);}
+});
+
+// ===== 岗位市场：批量 AI 分析（抓 JD + 分析，后台线程 + 轮询进度） =====
+let _batchTimer=null;
+document.getElementById('batchAnalyzeBtn').addEventListener('click',async()=>{
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再批量分析');return;}
+  if(!confirm('将为所有还没有 AI 分析结果的岗位逐个：抓取 JD（原生通道，每个约 20~40 秒）+ AI 匹配分析。\n期间会接管键鼠操作 Chrome，请不要最小化浏览器窗口。\n确定开始？'))return;
+  try{
+    const r=await fetch('/api/analyze-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const d=await r.json();
+    if(!d.ok){showToast('无法开始',d.error||'未知错误');return;}
+    if(d.started===false){showToast('无需分析',d.message||'所有岗位都已有分析结果');return;}
+    showToast('批量分析已开始',`共 ${d.total} 个岗位，可切到别的页面，进度见岗位市场顶部`);
+    _pollBatch();
+  }catch(e){showToast('启动失败',e.message);}
+});
+function _pollBatch(){
+  if(_batchTimer)clearInterval(_batchTimer);
+  const chip=document.getElementById('batchChip');
+  _batchTimer=setInterval(async()=>{
+    try{
+      const s=await(await fetch('/api/analyze-batch/status')).json();
+      if(!s.running&&!s.done){clearInterval(_batchTimer);_batchTimer=null;chip.style.display='none';return;}
+      chip.style.display='';
+      chip.textContent=s.running?`🤖 ${s.done}/${s.total} ${s.failed?`· 失败${s.failed}`:''} · ${s.current||'…'} ⏹`:`✅ 完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}（点击收起）`;
+      if(!s.running){
+        clearInterval(_batchTimer);_batchTimer=null;
+        showToast('批量分析完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
+        loadJobs();
+      }
+    }catch(e){}
+  },2500);
+}
+document.getElementById('batchChip').addEventListener('click',async()=>{
+  const chip=document.getElementById('batchChip');
+  if(chip.textContent.startsWith('🤖')){
+    if(!confirm('停止批量分析？已完成的部分会保留。'))return;
+    await fetch('/api/analyze-batch/stop',{method:'POST'});
+  }else{
+    chip.style.display='none';
+  }
 });
 
 // ===== Smart Scrape =====
@@ -2258,6 +2496,7 @@ async function openJobDetail(platform, jobId){
   document.getElementById('jdModalLink').href='#';
   modal.style.display='flex';
   await _ensureProfile();
+  _ensureLlmConfigs();
   try{
     const r=await fetch(`/api/jobs/${encodeURIComponent(platform)}/${encodeURIComponent(jobId)}`);
     if(!r.ok)throw new Error('HTTP '+r.status);
@@ -2281,6 +2520,82 @@ async function _ensureProfile(){
     }catch(e){}
   }
   return currentProfile;
+}
+let _llmCache=null;   // {configs:[{id,name,base_url,api_key(掩码),model}], active_id}
+async function _ensureLlmConfigs(){
+  if(_llmCache===null){
+    try{
+      const r=await fetch('/api/llm/configs');
+      _llmCache=await r.json();
+    }catch(e){_llmCache={configs:[],active_id:null};}
+  }
+  return _llmCache;
+}
+// AI 匹配分析：JD 就绪后自动运行（有缓存秒显）；未配置模型则整块隐藏，只留本地技能对照
+async function _initAnalysis(j){
+  const box=document.getElementById('aiAnalysisBox');
+  if(!box)return;
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){box.style.display='none';return;}
+  box.style.display='';
+  if(j.llm_analysis){box.innerHTML=_renderAnalysis(j.llm_analysis,j);return;}
+  box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--text-3)">🤖 AI 匹配分析中…（约 10~20 秒）</div>`;
+  await _runAnalysis(j,false,box);
+}
+async function _runAnalysis(j,refresh,box){
+  box=box||document.getElementById('aiAnalysisBox');
+  if(!box)return;
+  try{
+    const r=await fetch('/api/match-analysis',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({platform:_jdModalCtx.platform,job_id:_jdModalCtx.jobId,refresh})});
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'分析失败');
+    box.innerHTML=_renderAnalysis(d.analysis,j);
+  }catch(e){
+    box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--red)">AI 分析失败：${_escHtml(e.message)} <span style="color:var(--accent);cursor:pointer" onclick="_initAnalysis({llm_analysis:null})">重试</span></div>`;
+  }
+}
+function _renderAnalysis(a,j){
+  const col=a.score>=75?'var(--green)':a.score>=50?'#eab308':'var(--red)';
+  const lis=(arr,ico,color)=>arr.map(t=>`<div style="display:flex;gap:7px;font-size:12.5px;line-height:1.6"><span style="color:${color};flex-shrink:0">${ico}</span><span>${_escHtml(t)}</span></div>`).join('');
+  return `<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:12px;background:var(--bg-2)">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <div style="font-size:20px;font-weight:700;color:${col}">${a.score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> AI 匹配</span></div>
+      <div style="font-size:12.5px;color:var(--text-2);flex:1">${_escHtml(a.verdict)}</div>
+      <span style="font-size:10.5px;color:var(--text-3);cursor:pointer;white-space:nowrap" onclick="_runAnalysis(null,true)">重新分析</span>
+    </div>
+    ${a.strengths.length?`<div style="margin-bottom:6px">${lis(a.strengths,'✓','var(--green)')}</div>`:''}
+    ${a.gaps.length?`<div style="margin-bottom:6px">${lis(a.gaps,'!','var(--red)')}</div>`:''}
+    ${a.advice.length?`<div>${lis(a.advice,'→','var(--blue)')}</div>`:''}
+    <div style="font-size:10.5px;color:var(--text-3);margin-top:8px">由 ${_escHtml(a.model||'AI')} 生成 · 仅基于当前资料与 JD，供参考</div>
+  </div>`;
+}
+// 打招呼语：LLM 按岗位 JD 生成，一键复制去 BOSS 粘贴；未配置模型时模板降级
+async function _runGreeting(j){
+  const box=document.getElementById('greetBox');
+  if(!box)return;
+  box.style.display='';
+  box.innerHTML='<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--text-3)">✍️ 正在生成打招呼语…</div>';
+  try{
+    const r=await fetch('/api/greeting',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({platform:_jdModalCtx.platform,job_id:_jdModalCtx.jobId})});
+    const d=await r.json();
+    if(!d.ok)throw new Error(d.error||'生成失败');
+    const note=d.source==='template'?'（未配置 AI 模型，本地模板生成——到「设置 → AI 模型」配置后效果更好）':`由 ${_escHtml(d.model||'AI')} 生成`;
+    box.innerHTML=`<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-top:8px;background:var(--bg-2)">
+      <div style="font-size:13px;line-height:1.7;color:var(--text);white-space:pre-wrap" id="greetText">${_escHtml(d.greeting)}</div>
+      <div style="display:flex;align-items:center;margin-top:8px;gap:8px">
+        <span style="font-size:10.5px;color:var(--text-3);flex:1">${note}${d.error?' · LLM 异常已降级：'+_escHtml(d.error):''}</span>
+        <button class="btn" id="greetCopyBtn" style="padding:4px 10px;font-size:11.5px">复制去 BOSS 发送</button>
+      </div>
+    </div>`;
+    document.getElementById('greetCopyBtn').addEventListener('click',async()=>{
+      try{await navigator.clipboard.writeText(d.greeting);showToast('已复制','去 BOSS 聊天框粘贴发送即可');}
+      catch(e){showToast('复制失败','请手动选中文本复制');}
+    });
+  }catch(e){
+    box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--red)">生成失败：${_escHtml(e.message)}</div>`;
+  }
 }
 // 技能对照：岗位标签 vs 个人资料技能（✓=命中；+=岗位要求但资料未列）。纯本地比对，缺任一侧不显示
 function _skillCompareHtml(tags){
@@ -2336,15 +2651,20 @@ function renderJobDetailModal(j){
       </div>
       ${dims.reasoning?`<div class="score-tip" style="margin:0 0 12px">💡 ${_escHtml(dims.reasoning)}</div>`:''}`:''}
     ${_skillCompareHtml(j.tags||[])}
+    <div id="aiAnalysisBox"></div>
     <div style="font-size:12px;color:var(--text-3);font-weight:600;margin-bottom:8px;letter-spacing:.05em;text-transform:uppercase">职位描述（JD）</div>
     <div id="jdText" style="font-size:13px;line-height:1.8;color:var(--text-2);white-space:pre-wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:14px;min-height:60px">
       <span style="color:var(--text-3)">正在获取 JD 正文…</span>
     </div>
+    <div id="greetBox" style="display:none"></div>
     <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
+      <button class="btn" id="greetBtn" style="padding:5px 10px;font-size:11.5px" title="按岗位 JD 与个人资料生成 BOSS 打招呼语">👋 打招呼语</button>
       <button class="btn" id="jdRefreshBtn" style="padding:5px 10px;font-size:11.5px">重新抓取 JD</button>
     </div>`;
   const rb2=document.getElementById('jdRefreshBtn');
   if(rb2)rb2.addEventListener('click',()=>loadJobJd(j, true));
+  const gb=document.getElementById('greetBtn');
+  if(gb)gb.addEventListener('click',()=>_runGreeting(j));
 }
 async function loadJobJd(j, refresh){
   const box=document.getElementById('jdText');
@@ -2357,6 +2677,7 @@ async function loadJobJd(j, refresh){
     const d=await r.json();
     if(d.ok){
       box.textContent=d.jd;
+      _initAnalysis(j);   // JD 就绪：有 AI 配置则自动分析（有缓存秒显），无配置整块隐藏
     }else{
       box.innerHTML=`<span style="color:var(--red);font-size:12.5px">${_escHtml(d.error||'获取失败')}</span>`;
     }
