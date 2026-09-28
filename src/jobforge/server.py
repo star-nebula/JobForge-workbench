@@ -28,6 +28,9 @@ FastAPI + spider.py
   POST /api/match-analysis     岗位匹配分析（LLM，结果缓存 llm_analysis）
   POST /api/analyze-batch      批量分析：抓 JD + 分析全部缺分析岗位（后台线程）
   GET  /api/analyze-batch/status / POST .../stop   批量进度查询 / 停止
+  GET  /api/scrape-progress    悬浮窗轮询：当前抓取任务进度（含暂停/停止态）
+  POST /api/scrape-control     悬浮窗按钮：pause / resume / stop
+  POST /api/hud/launch         手动打开悬浮进度窗（设置页开关）
   GET  /                       静态页面入口
 """
 import io
@@ -46,15 +49,25 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 
-import spider
-import db
-import llm
-import profile_score
-from fetch_jd import clean_jd
+if __package__ in (None, ""):   # 直接跑脚本（python src/jobforge/server.py）时补齐包路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIES_FILE = os.path.join(PROJECT_DIR, "cookies.json")
-GRAB_SCRIPT = os.path.join(PROJECT_DIR, "grab_cookies.py")
+from jobforge import db, fetch_gate, llm, paths, profile_score, spider
+from jobforge.fetch_jd import clean_jd
+
+# 抓取/HUD 子进程按 `-m jobforge.*` 拉起，需要 src 在 PYTHONPATH 里（run.bat 已设，这里兜底）
+_PYTHONPATH = os.environ.get("PYTHONPATH", "")
+if paths.SRC_DIR not in _PYTHONPATH.split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        [p for p in [paths.SRC_DIR] + _PYTHONPATH.split(os.pathsep) if p])
+
+PROJECT_DIR = paths.PROJECT_ROOT      # 子进程 cwd：抓取要在项目根起
+COOKIES_FILE = paths.data("cookies.json")
+GRAB_MODULE = "jobforge.tools.grab_cookies"
+HUD_MODULE = "jobforge.tools.hud"
+MESSAGES_MODULE = "jobforge.tools.messages"
+FETCH_JD_MODULE = "jobforge.fetch_jd"
+NATIVE_MODULE = "jobforge.fetch_jd_native"
 
 app = FastAPI(title="JobForge 求职工作台 API", version="1.0.0")
 
@@ -237,8 +250,26 @@ def test_llm_config(req: LLMTestReq):
 
 
 # ---------- CDP Chrome 自动启动 ----------
-CHROME_PROFILE_DIR = os.path.join(PROJECT_DIR, "chrome-profile")
 CDP_CHECK_URL = "http://127.0.0.1:9222/json/version"
+
+
+def _chrome_profile_dir() -> str:
+    """CDP 专用 Chrome profile（独立 user-data-dir，不碰日常浏览器）。
+
+    正式位置 data/chrome-profile；旧位置（项目根 chrome-profile）里还留着登录态时
+    先沿用旧的，免得换路径后 Chrome 用空 profile 起、要重新登录 BOSS。
+    """
+    new = paths.data("chrome-profile")
+    if not os.path.isdir(new):
+        legacy = os.path.join(paths.PROJECT_ROOT, "chrome-profile")
+        if os.path.isdir(legacy):
+            print(f"[JobForge] 提示：Chrome profile 仍在旧位置 {legacy}，"
+                  f"关掉 Chrome 后移入 {new} 即完成迁移（README「目录结构」）。")
+            return legacy
+    return new
+
+
+CHROME_PROFILE_DIR = _chrome_profile_dir()
 
 
 def _find_chrome():
@@ -314,14 +345,14 @@ def _ensure_cdp_chrome(wait_sec=12):
 
 @app.post("/api/refresh-cookies")
 def refresh_cookies():
-    """用 venv python 跑 grab_cookies.py，从 CDP（127.0.0.1:9222）重抓 cookie 写 cookies.json。
+    """用 venv python 跑 grab_cookies，从 CDP（127.0.0.1:9222）重抓 cookie 写 data/cookies.json。
     若因 Chrome 9222 未启动而失败，自动拉起调试 Chrome 后重试一次。"""
-    if not os.path.exists(GRAB_SCRIPT):
-        return {"ok": False, "error": "grab_cookies.py 不存在"}
+    if not os.path.exists(paths.module_file(GRAB_MODULE)):
+        return {"ok": False, "error": "grab_cookies 模块不存在"}
 
     def _run():
         return subprocess.run(
-            [sys.executable, GRAB_SCRIPT],
+            [sys.executable, "-m", GRAB_MODULE],
             capture_output=True, text=True, timeout=15,
             cwd=PROJECT_DIR,
         )
@@ -357,7 +388,7 @@ def native_status():
 def _native_channel_status() -> Dict:
     try:
         r = subprocess.run(
-            [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd_native.py"), "--check-json"],
+            [sys.executable, "-m", NATIVE_MODULE, "--check-json"],
             capture_output=True, text=True, timeout=60, cwd=PROJECT_DIR,
         )
         lines = (r.stdout or "").strip().splitlines()
@@ -554,31 +585,56 @@ def start_analyze_batch(req: AnalyzeBatchReq):
     _batch.update({"running": True, "stop": False, "total": len(jobs), "done": 0,
                    "ok": 0, "failed": 0, "current": "", "errors": []})
     _batch_cancel.clear()
+    _ensure_hud()
+    _progress_start("批量 AI 分析", "抓取 JD 并分析", total=len(jobs))
+    _progress_update(avg_sec=_ANALYZE_AVG_SEC)
     threading.Thread(target=_batch_worker, args=(jobs, cfg, _batch_cancel), daemon=True).start()
     return {"ok": True, "started": True, "total": len(jobs)}
 
 
 def _batch_worker(jobs, cfg, cancel: threading.Event):
     consecutive_fail = 0
+    stopped_by_user = False
     for j in jobs:
         if _batch["stop"] or cancel.is_set():
+            stopped_by_user = True
+            break
+        # 安全点：暂停在这里阻塞（页面/窗口都静止，不注入任何键鼠）；结束后置位则退出
+        try:
+            fetch_gate.checkpoint()
+        except fetch_gate.Stopped:
+            stopped_by_user = True
             break
         _batch["current"] = f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}"
+        _progress_update(current=f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}",
+                         phase="抓取 JD 正文")
         try:
             jd_res = _fetch_jd_core(j, refresh=False, cancel=cancel)
             if cancel.is_set():
+                stopped_by_user = True
                 break
             if not jd_res.get("ok"):
+                if fetch_gate.stopped():
+                    stopped_by_user = True
+                    break
                 raise llm.LLMError(jd_res.get("error") or "JD 抓取失败")
+            try:
+                fetch_gate.checkpoint()
+            except fetch_gate.Stopped:
+                stopped_by_user = True
+                break
+            _progress_update(phase="AI 匹配分析")
             fresh = db.get_job(j["platform"], j["job_id"]) or j
             analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, fresh)
             if cancel.is_set():
+                stopped_by_user = True
                 break
             db.save_job_analysis(j["platform"], j["job_id"], analysis)
             _batch["ok"] += 1
             consecutive_fail = 0
         except Exception as e:
-            if cancel.is_set():
+            if cancel.is_set() or fetch_gate.stopped():
+                stopped_by_user = True
                 break
             _batch["failed"] += 1
             if len(_batch["errors"]) < 20:
@@ -592,8 +648,15 @@ def _batch_worker(jobs, cfg, cancel: threading.Event):
                     f"zhipin.com 后重新开始（剩余 {_batch['total'] - _batch['done'] - 1} 个未处理）"[:160])
                 break
         _batch["done"] += 1
+        _progress_update(done=_batch["done"], ok=_batch["ok"], failed=_batch["failed"],
+                         phase="抓取 JD 正文")
     _batch["running"] = False
     _batch["current"] = ""
+    errs = _batch["errors"]
+    # 停止位也要看闸门本身：用户在最后一个岗位的分析期间点「结束」时，
+    # 循环已结束、stopped_by_user 来不及置位，但结果理应算「已停止」
+    _progress_finish(stopped=stopped_by_user or fetch_gate.stopped(),
+                     last_error=errs[-1] if errs else "")
 
 
 @app.get("/api/analyze-batch/status")
@@ -620,10 +683,210 @@ def analyze_batch_stop():
     return {"ok": True, "killed_procs": killed, "note": "当前岗位的 JD 抓取已中断，稍候 1~2 秒即停"}
 
 
+# ---------- 抓取进度（悬浮窗数据源）：岗位列表抓取 + 批量分析统一视图 ----------
+# 悬浮窗（hud.py，独立进程）轮询 /api/scrape-progress 取进度，按钮打
+# /api/scrape-control。暂停/结束信号落 fetch_gate.json（跨进程文件）：
+# 列表抓取在 server 线程内，JD 抓取在子进程内，文件是两者都能看到的单一信号源。
+_progress = {
+    "active": False, "title": "", "phase": "", "current": "",
+    "total": 0, "done": 0, "ok": 0, "failed": 0,
+    "started_at": 0.0, "detail_until_ts": 0.0, "finished_at": 0.0,
+    "stopped": False, "last_error": "", "avg_sec": 0.0,
+}
+_progress_lock = threading.Lock()
+_progress_depth = 0          # 嵌套深度：批量分析期间打开单个 JD 详情，不夺走进度显示
+_hud_proc: Optional[subprocess.Popen] = None
+
+
+def _progress_update(**kw):
+    with _progress_lock:
+        _progress.update(kw)
+
+
+def _progress_get() -> Dict:
+    with _progress_lock:
+        return dict(_progress)
+
+
+def _progress_start(title: str, phase: str, total: int = 0):
+    """任务开始：复位文件闸门（上一次的 stopped 不能影响新任务）+ 进程内计数清零。
+
+    嵌套规则：已有任务在跑时（如批量分析中打开 JD 弹窗），内层不再抢进度显示、
+    也不复位闸门——悬浮窗始终展示外层那个「大任务」，内层的抓取就是它的阶段之一。
+    """
+    global _progress_depth
+    _progress_depth += 1
+    if _progress_depth > 1:
+        return False
+    fetch_gate.clear()
+    _progress_update(active=True, title=title, phase=phase, current="",
+                     total=total, done=0, ok=0, failed=0,
+                     started_at=time.time(), detail_until_ts=0.0, finished_at=0.0,
+                     stopped=False, last_error="", avg_sec=0.0)
+    return True
+
+
+def _progress_finish(stopped: bool, last_error: str = ""):
+    """任务结束：置非活跃 + 记结束时间（悬浮窗停留展示后自动关闭）。
+    嵌套时只有最外层结束才真正收尾，内层结束不改动外层进度。"""
+    global _progress_depth
+    _progress_depth = max(0, _progress_depth - 1)
+    if _progress_depth > 0:
+        return
+    fetch_gate.set_state(paused=False)
+    _progress_update(active=False, phase="", current="", finished_at=time.time(),
+                     stopped=stopped, last_error=last_error, detail_until_ts=0.0)
+
+
+class _ProgressScope:
+    """抓取任务的进度作用域：enter 起任务，exit 无论如何都收尾（含异常/提前 return），
+    避免进度窗卡在「运行中」、嵌套计数泄漏。用法：
+
+        with _progress_scope("智能抓取", "打开搜索页", total=1) as sc:
+            sc.set(current="关键词「前端」")
+            ...
+    """
+
+    def __init__(self, title: str, phase: str, total: int = 0):
+        self.title, self.phase, self.total = title, phase, total
+        self.outer = False
+        self.last_error = ""
+        self.stopped = False      # 调用方可显式置位（如 slash 分支提前 return）
+
+    def __enter__(self):
+        _ensure_hud()
+        self.outer = _progress_start(self.title, self.phase, self.total)
+        return self
+
+    def set(self, **kw):
+        # 嵌套时内层不夺走外层的显示（比如批量分析里打开单个 JD 弹窗）
+        if self.outer:
+            _progress_update(**kw)
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc is not None and not issubclass(exc_type, fetch_gate.Stopped):
+            self.last_error = f"{exc_type.__name__}: {exc}"
+        _progress_finish(stopped=self.stopped or fetch_gate.stopped(),
+                         last_error=self.last_error)
+        return False
+
+
+def _progress_scope(title: str, phase: str, total: int = 0) -> "_ProgressScope":
+    return _ProgressScope(title, phase, total)
+
+
+def _progress_eta(done: int, started_at: float, avg_sec: float, total: int) -> Optional[float]:
+    """剩余时间估算：有历史均值用均值，否则用本次已完成的平均耗时。"""
+    if not total or total <= done or not started_at:
+        return None
+    if avg_sec:
+        return round(avg_sec * (total - done), 1)
+    elapsed = time.time() - started_at
+    if done <= 0 or elapsed <= 0:
+        return None
+    return round(elapsed / done * (total - done), 1)
+
+
+# 批量分析每个岗位约 30~50 秒（JD 抓取节流 18~35s + LLM 分析），用于进度条 ETA
+_ANALYZE_AVG_SEC = 42.0
+
+
+@app.get("/api/scrape-progress")
+def scrape_progress():
+    """悬浮窗轮询：当前抓取进度 + 暂停/停止态。无任务时 active=false。"""
+    p = _progress_get()
+    p["paused"] = fetch_gate.paused()
+    p["stopping"] = bool(p["active"] and fetch_gate.stopped())
+    need = _progress_eta(p["done"], p["started_at"], p["avg_sec"], p["total"])
+    p["eta_sec"] = need
+    return p
+
+
+class ScrapeControlReq(BaseModel):
+    action: str = Field(..., description="pause | resume | stop")
+
+
+@app.post("/api/scrape-control")
+def scrape_control(req: ScrapeControlReq):
+    """悬浮窗按钮：暂停 / 继续 / 结束。
+    暂停只挡「安全点」（抓取循环的岗位边界与节流等待），不会把正在注入的
+    一次键鼠动作撕成两半；结束会同时置停止位并 kill 在跑的抓取子进程。"""
+    act = (req.action or "").strip().lower()
+    if act == "pause":
+        if not fetch_gate.stopped():
+            fetch_gate.set_state(paused=True)
+        return {"ok": True, "paused": True}
+    if act == "resume":
+        fetch_gate.set_state(paused=False)
+        return {"ok": True, "paused": False}
+    if act == "stop":
+        fetch_gate.set_state(stopped=True, paused=False)
+        _batch["stop"] = True
+        _batch_cancel.set()
+        killed = 0
+        with _batch_proc_lock:
+            procs = list(_batch_procs)
+        for p in procs:
+            try:
+                p.kill()
+                killed += 1
+            except Exception:
+                pass
+        return {"ok": True, "stopped": True, "killed_procs": killed}
+    raise HTTPException(status_code=400, detail="action 必须是 pause / resume / stop")
+
+
+@app.post("/api/hud/launch")
+def launch_hud():
+    """手动打开悬浮进度窗（前端开关；抓取时会自动拉起，这里是给用户先看位置用）。"""
+    global _hud_proc
+    if _hud_proc is not None and _hud_proc.poll() is None:
+        return {"ok": True, "already_running": True}
+    if not os.path.exists(paths.module_file(HUD_MODULE)):
+        return {"ok": False, "error": "hud 模块不存在"}
+    try:
+        # 继承本实例的闸门文件与服务地址：换端口/换数据目录起实例时，
+        # 悬浮窗读写的仍是这个实例的状态，不会串到默认 8080
+        env = {**os.environ, "JOBFORGE_GATE_FILE": fetch_gate.gate_path(),
+               "JOBFORGE_API": f"http://127.0.0.1:{_listen_port()}"}
+        _hud_proc = subprocess.Popen([sys.executable, "-m", HUD_MODULE], cwd=PROJECT_DIR, env=env,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "started": True}
+
+
+def _listen_port() -> int:
+    """本实例实际监听端口（__main__ 启动时按 --port/PORT 写入，缺省 8080）。
+    悬浮窗要连对实例：同一台机器可能同时跑着正式实例与调试实例。"""
+    return int(os.environ.get("JOBFORGE_PORT") or 8080)
+
+
+_server_port = int(os.environ.get("JOBFORGE_PORT") or 8080)
+
+
+def _ensure_hud():
+    """抓取启动时自动拉起悬浮窗（已在运行则复用）。失败静默——进度窗是锦上添花，
+    绝不能因为它起不来而挡住抓取。"""
+    try:
+        launch_hud()
+    except Exception:
+        pass
+
+
 @app.post("/api/crawl")
 def crawl_jobs(req: CrawlReq):
-    result = spider.crawl(req.platform, req.query, req.city, req.page, req.use_mock)
-    return result
+    """单页抓取（岗位列表）：带进度上报与暂停/结束支持。"""
+    try:
+        with _progress_scope("岗位列表抓取", "打开搜索页并读取岗位列表", total=1) as sc:
+            sc.set(current=f"关键词「{req.query}」· {req.city}")
+            result = spider.crawl(req.platform, req.query, req.city, req.page, req.use_mock)
+            ok = result.get("source") == "real"
+            sc.set(done=1, ok=1 if ok else 0, failed=0 if ok else 1,
+                   last_error="" if ok else (result.get("error") or "抓取失败"))
+            return result
+    except fetch_gate.Stopped as e:
+        return {"jobs": [], "source": "stopped", "platform": req.platform, "error": str(e)}
 
 
 @app.post("/api/resume/upload-pdf")
@@ -661,7 +924,18 @@ def scrape_from_resume(req: ScrapeFromResumeReq):
     query = keywords["target_position"] or " ".join(keywords["skills"][:3]) or "前端工程师"
     city = req.city or keywords["city"] or "全国"
 
-    result = spider.crawl(req.platform, query, city, req.page, req.use_mock)
+    with _progress_scope("智能抓取", "打开搜索页并读取岗位列表", total=1) as sc:
+        sc.set(current=f"关键词「{query}」· {city}")
+        try:
+            result = spider.crawl(req.platform, query, city, req.page, req.use_mock)
+        except fetch_gate.Stopped as e:
+            sc.stopped = True
+            return {"keywords": keywords, "query_used": query, "city_used": city,
+                    "jobs": [], "source": "stopped", "platform": req.platform,
+                    "error": str(e), "stats": {"total": 0, "new": 0, "seen": 0}}
+        ok = result.get("source") == "real"
+        sc.set(done=1, ok=1 if ok else 0, failed=0 if ok else 1,
+               last_error="" if ok else (result.get("error") or "抓取失败"))
 
     # 计算匹配度（P3：4 维 + reasoning）+ 拍平到 job
     for job in result["jobs"]:
@@ -717,20 +991,19 @@ def get_messages():
 
 @app.post("/api/messages/refresh")
 def refresh_messages():
-    """跑 messages.py 从 CDP 浏览器监听 BOSS 聊天页会话响应，入库后返回最新列表。
+    """跑 messages 模块从 CDP 浏览器监听 BOSS 聊天页会话响应，入库后返回最新列表。
     若因 Chrome 9222 未启动而失败，自动拉起调试 Chrome 后重试一次。"""
-    script = os.path.join(PROJECT_DIR, "messages.py")
-    if not os.path.exists(script):
-        return {"ok": False, "error": "messages.py 不存在"}
+    if not os.path.exists(paths.module_file(MESSAGES_MODULE)):
+        return {"ok": False, "error": "messages 模块不存在"}
 
     def _run():
         r = subprocess.run(
-            [sys.executable, script],
+            [sys.executable, "-m", MESSAGES_MODULE],
             capture_output=True, text=True, timeout=45,
             cwd=PROJECT_DIR,
         )
         # 脚本崩溃与否都尝试读 messages.json（业务失败信息在文件里）
-        out = os.path.join(PROJECT_DIR, "messages.json")
+        out = paths.data("messages.json")
         data = {}
         if os.path.exists(out):
             try:
@@ -789,11 +1062,53 @@ def get_seen_job(platform: str, job_id: str):
 
 @app.get("/api/jobs/{platform}/{job_id}/jd")
 def get_job_jd(platform: str, job_id: str, refresh: bool = False):
-    """岗位完整 JD 正文：优先读库缓存，无缓存（或 refresh=1）则抓详情页解析并入库。"""
+    """岗位完整 JD 正文：优先读库缓存，无缓存（或 refresh=1）则抓详情页解析并入库。
+    详情弹窗的抓取同样会接管键鼠，故沿用悬浮窗进度（缓存直读不上报，避免闪窗）。"""
     job = db.get_job(platform, job_id)
     if not job:
         raise HTTPException(status_code=404, detail="job not found")
-    return _fetch_jd_core(job, refresh)
+    if job.get("jd_text") and not refresh:
+        return _fetch_jd_core(job, refresh)
+    with _progress_scope("抓取 JD 正文", "打开岗位详情页", total=1) as sc:
+        sc.set(current=f"{(job.get('title') or '')[:30]} · {(job.get('company') or '')[:16]}")
+        r = _fetch_jd_core(job, refresh)
+        ok = bool(r.get("ok"))
+        sc.set(done=1, ok=1 if ok else 0, failed=0 if ok else 1,
+               last_error="" if ok else (r.get("error") or "抓取失败"))
+        return r
+
+
+def _communicate_pausable(proc: subprocess.Popen, timeout: float = 150) -> Optional[Dict]:
+    """带暂停/停止语义地等子进程输出，返回解析后的 JSON（超时/无输出返回 None）。
+
+    与 subprocess.communicate(timeout) 的区别：暂停时子进程可能停在安全点不动，
+    超时倒计时不应继续走（否则「暂停 → 恢复」会被 150s 超时误杀）；停止时立刻
+    kill 并返回，不再等满超时（子进程自己也会在安全点退出）。
+    """
+    deadline = time.time() + timeout
+    while True:
+        try:
+            out, _err = proc.communicate(timeout=0.5)
+            line = (out or "").strip().splitlines()
+            try:
+                return json.loads(line[-1]) if line else None
+            except Exception:
+                return None
+        except subprocess.TimeoutExpired:
+            if fetch_gate.stopped():
+                try:
+                    proc.kill()
+                    proc.communicate()
+                except Exception:
+                    pass
+                return None
+            if fetch_gate.paused():
+                deadline = time.time() + timeout      # 暂停期间不计时
+                continue
+            if time.time() >= deadline:
+                proc.kill()
+                proc.communicate()
+                return None
 
 
 def _fetch_jd_core(job: Dict, refresh: bool = False,
@@ -803,9 +1118,9 @@ def _fetch_jd_core(job: Dict, refresh: bool = False,
     cancel：批量停止时置位——正在跑的子进程会被登记并在 stop 端点直接 kill，
     使停止在秒级生效（标志位只在岗位边界检查，子进程最长阻塞 150s）。"""
     def _run_fetch_jd(env_extra=None):
-        """跑 fetch_jd.py 子进程；登记到 _batch_procs 供 stop 端点 kill。"""
+        """跑 fetch_jd 子进程；登记到 _batch_procs 供 stop 端点 kill。"""
         proc = subprocess.Popen(
-            [sys.executable, os.path.join(PROJECT_DIR, "fetch_jd.py"),
+            [sys.executable, "-m", FETCH_JD_MODULE,
              platform, job_id, job["url"],
              job.get("title") or "", job.get("company") or ""],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -814,19 +1129,15 @@ def _fetch_jd_core(job: Dict, refresh: bool = False,
         with _batch_proc_lock:
             _batch_procs.add(proc)
         try:
-            try:
-                out, err = proc.communicate(timeout=150)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                out, err = proc.communicate()
-                return None, f"抓取超时（150s）"
-            line = (out or "").strip().splitlines()
-            d2 = json.loads(line[-1]) if line else {}
+            d2 = _communicate_pausable(proc, timeout=150)
+            if d2 is None:
+                if fetch_gate.stopped():
+                    return {"ok": False, "error": "已停止", "stopped": True}, None
+                return None, "抓取超时（150s）"
             return d2, None
         finally:
             with _batch_proc_lock:
                 _batch_procs.discard(proc)
-
     platform, job_id = job["platform"], job["job_id"]
     if job.get("jd_text") and not refresh:
         # 历史缓存可能含招聘者卡/公司介绍等冗余块（清洗上线前入库），出口兜底
@@ -848,14 +1159,17 @@ def _fetch_jd_core(job: Dict, refresh: bool = False,
             elif d2.get("ok") and d2.get("jd"):
                 db.save_jd(platform, job_id, d2["jd"][:20000])
                 return {"ok": True, "jd": d2["jd"][:20000], "cached": False}
+            elif (d2 or {}).get("stopped"):
+                # 用户点了「结束」：不再走 CDP/直连兜底，立即返回
+                return {"ok": False, "error": d2.get("error") or "已停止", "stopped": True}
             else:
                 fetch_err = (d2 or {}).get("error") or "抓取失败"
         except Exception as e:
             fetch_err = f"抓取异常: {type(e).__name__}: {e}"
 
         # 停止信号已在子进程 kill 后置位时，直接返回（不再走兜底链路）
-        if cancel is not None and cancel.is_set():
-            return {"ok": False, "error": "已停止"}
+        if (cancel is not None and cancel.is_set()) or fetch_gate.stopped():
+            return {"ok": False, "error": "已停止", "stopped": True}
 
         # 兜底1：原生失败且 9222 不可达 → 此刻才拉调试 Chrome，用 CDP 通道重试一次
         if fetch_err and "9222 不可达" in fetch_err:
@@ -876,7 +1190,7 @@ def _fetch_jd_core(job: Dict, refresh: bool = False,
                 fetch_err = f"{fetch_err}；且无法启动调试浏览器：{note}"
 
         if cancel is not None and cancel.is_set():
-            return {"ok": False, "error": "已停止"}
+            return {"ok": False, "error": "已停止", "stopped": True}
 
         # 兜底：requests 直连详情页 HTML（可能被「请稍候」挑战拦截）
         cookies = spider._load_cookies("boss")
@@ -941,25 +1255,35 @@ def update_seen_job(platform: str, job_id: str, req: UpdateJobReq):
 
 @app.get("/")
 def index():
-    return FileResponse("job-workbench.html")
+    return FileResponse(os.path.join(paths.WEB_DIR, "job-workbench.html"))
 
 
 if __name__ == "__main__":
     import urllib.error
     import urllib.request
     import uvicorn
+    # 端口：默认 8080；可用 --port 8090 或环境变量 JOBFORGE_PORT 覆盖
+    # （调试/自测起第二个实例用；悬浮窗按此端口连回来，不会串到正式实例）。
+    port = 8080
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == "--port" and i + 1 < len(argv):
+            port = int(argv[i + 1])
+        elif a.startswith("--port="):
+            port = int(a.split("=", 1)[1])
+    os.environ["JOBFORGE_PORT"] = str(port)
     # 只监听本机回环：接口无鉴权且含个人求职数据，不暴露到局域网（2026-09-26）
-    # 防重复启动（如连点两次 run.bat）：启动前探活 8080。
+    # 防重复启动（如连点两次 run.bat）：启动前探活同端口。
     # 注意：venv 的 python.exe 会派生出基础解释器子进程，任务管理器里两个 python
     # 属同一实例的正常父子形态（2026-09-27 曾误判为「双实例双绑」，已更正）。
     try:
-        urllib.request.urlopen("http://127.0.0.1:8080/api/platforms", timeout=2)
-        print("[JobForge] 8080 端口已有 JobForge 实例在运行，本次启动取消。如确需重启，请先结束旧的 server.py 进程。")
+        urllib.request.urlopen(f"http://127.0.0.1:{port}/api/platforms", timeout=2)
+        print(f"[JobForge] {port} 端口已有 JobForge 实例在运行，本次启动取消。如确需重启，请先结束旧的 server.py 进程。")
         sys.exit(1)
     except urllib.error.HTTPError:
         # 端口有 HTTP 响应（无论什么路径）＝ 已有服务在跑
-        print("[JobForge] 8080 端口已有服务在响应，本次启动取消。")
+        print(f"[JobForge] {port} 端口已有服务在响应，本次启动取消。")
         sys.exit(1)
     except Exception:
         pass  # 连不上 = 端口空闲，正常启动
-    uvicorn.run(app, host="127.0.0.1", port=8080)
+    uvicorn.run(app, host="127.0.0.1", port=port)

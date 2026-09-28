@@ -1,5 +1,6 @@
-"""通过 CDP 连接到用户已启动的 Chrome，读取 zhipin.com 的 cookie 写入 cookies.json。
-用法：先启动 Chrome with --remote-debugging-port=9222，再跑本脚本。
+"""通过 CDP 连接到用户已启动的 Chrome，读取 zhipin.com 的 cookie 写入 data/cookies.json。
+用法：先启动 Chrome with --remote-debugging-port=9222，再跑本脚本
+（python -m jobforge.tools.grab_cookies，或由 server 的 /api/refresh-cookies 拉起）。
 """
 import json
 import os
@@ -7,8 +8,10 @@ import sys
 
 from playwright.sync_api import sync_playwright
 
+from jobforge import paths
+
 CDP_URL = "http://localhost:9222"
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
+COOKIES_FILE = paths.data("cookies.json")
 
 # 域名 → 平台 key 映射
 DOMAIN_PLATFORM = [

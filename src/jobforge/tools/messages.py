@@ -8,7 +8,7 @@
   - 解析是防御式的：字段名按候选链匹配 + 深度搜索，BOSS 改字段名也能兜底
   - 只读不写：不点击会话、不发消息，避免产生「已读」等副作用
 
-输出：写 messages.json（{ok, fetched_at, messages, source, error, debug_urls, debug_sample}）
+输出：写 data/messages.json（{ok, fetched_at, messages, source, error, debug_urls, debug_sample}）
 server.py 的 POST /api/messages/refresh 用 subprocess 跑本脚本后读文件入库。
 
 用法前置（与 grab_cookies.py 相同）：Chrome --remote-debugging-port=9222 且已登录 BOSS。
@@ -20,8 +20,10 @@ import time
 
 from playwright.sync_api import sync_playwright
 
+from jobforge import paths
+
 CDP_URL = "http://localhost:9222"
-OUT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "messages.json")
+OUT_FILE = paths.data("messages.json")
 CHAT_URL = "https://www.zhipin.com/web/geek/chat"
 WAIT_SECONDS = 12               # 页面加载后监听窗口
 

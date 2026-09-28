@@ -5,20 +5,15 @@ __pycache__/
 venv/
 
 # 运行时数据（含个人求职数据，不入库）
-jobs.db
-jobs.db-shm
-jobs.db-wal
-messages.json
-fetch_throttle.json
-_server.log
-.trash/
-.trashjobs_check.json
+data/
 
 # 浏览器登录态与凭据（敏感，绝不入库）
-cookies.json
 chrome-profile/
 .chrome-cdp-profile/
 
 # 工具与临时目录
+_server.log
+.trash/
+.trashjobs_check.json
 .zcode/
 _mem_stage/

@@ -1,8 +1,8 @@
 """llm 功能层测试：JSON 容错解析、模板降级、三个功能函数（chat 全部 mock，不真调外部服务）。"""
 import pytest
 
-import llm
-from llm import LLMError, analyze_match, greeting, parse_json, polish_resume
+from jobforge import llm
+from jobforge.llm import LLMError, analyze_match, greeting, parse_json, polish_resume
 
 PDATA = {
     "name": "张三", "target_position": "前端工程师", "city": "上海",

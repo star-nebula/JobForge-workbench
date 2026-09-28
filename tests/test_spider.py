@@ -1,5 +1,5 @@
 """extract_resume_keywords / calc_match_score 测试。"""
-from spider import calc_match_score, extract_resume_keywords
+from jobforge.spider import calc_match_score, extract_resume_keywords
 
 
 def test_extract_basic():

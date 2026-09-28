@@ -1,7 +1,7 @@
 """db 层回环测试（jobs / profile / resume_versions / scrape_log），用 tmp 库不动真实 jobs.db。"""
 import pytest
 
-import db
+from jobforge import db
 
 
 @pytest.fixture

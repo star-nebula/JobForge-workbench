@@ -1,9 +1,8 @@
 """server 层纯函数测试：密钥脱敏 + 模型配置选型 + 批量分析预检（db/llm mock，不碰真实库）。"""
 import pytest
 
-import llm
-import server
-from server import AnalyzeBatchReq, _get_llm_config, _mask_key
+from jobforge import llm, server
+from jobforge.server import AnalyzeBatchReq, _get_llm_config, _mask_key
 
 
 def test_mask_key():

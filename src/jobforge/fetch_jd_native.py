@@ -24,11 +24,10 @@
 
 前提：Chrome 已打开并登录 zhipin.com（优先用日常浏览器的窗口，设备指纹最真实）。
 注意：抓取期间会临时接管键鼠约 20~60 秒，请勿操作电脑；剪贴板会被临时占用并在
-结束后恢复。自检：python fetch_jd_native.py --check（只查窗口/节流，不导航）。
+结束后恢复。自检：python -m jobforge.fetch_jd_native --check（只查窗口/节流，不导航）。
 """
 import ctypes
 import json
-import os
 import random
 import re
 import sys
@@ -45,8 +44,9 @@ import pygetwindow as gw
 import pyperclip
 from pywinauto import Application
 
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
-THROTTLE_FILE = os.path.join(PROJECT_DIR, "fetch_throttle.json")
+from jobforge import fetch_gate, paths
+
+THROTTLE_FILE = paths.data("fetch_throttle.json")
 THROTTLE_MIN, THROTTLE_MAX = 18, 35
 SEARCH_URL = "https://www.zhipin.com/web/geek/jobs?query={q}&city=100010000"
 JD_HEADS = ("职位描述", "职位详情", "岗位职责")
@@ -75,9 +75,12 @@ def throttle_due_in() -> float:
 
 
 def throttle_wait(max_wait: float = 60):
+    """等节流窗口到期再认领下一个时段。等待本身可暂停（暂停时长不算进节流，
+    否则恢复后还要再等一整轮）、可被「结束」打断（最迟 0.5s raise Stopped）。"""
     wait = min(throttle_due_in(), max_wait)
     if wait > 0:
-        time.sleep(wait + random.uniform(0.5, 2.0))
+        fetch_gate.wait_pausable(wait + random.uniform(0.5, 2.0))
+    fetch_gate.checkpoint()      # 无节流等待时也要过闸：暂停/结束必须立刻可感
     try:
         with open(THROTTLE_FILE, "w", encoding="utf-8") as f:
             json.dump({"next_ok_ts": time.time() + random.uniform(THROTTLE_MIN, THROTTLE_MAX)}, f)
@@ -577,6 +580,7 @@ def crawl_boss_native(query: str, city_code: str, page: int = 1) -> dict:
     api = ("https://www.zhipin.com/wapi/zpgeek/search/joblist.json"
            f"?scene=1&query={quote(q)}&city={city_code}&page={page}&pageSize=30")
     throttle_wait()
+    fetch_gate.checkpoint()      # 安全点：暂停/结束在导航前生效，不打断键鼠序列
     w = find_zhipin_tab()
     backup = None
     try:
@@ -636,6 +640,8 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
             if _page_ok(reused, title, company):
                 jd = extract_jd(page_text)
         if len(jd.strip()) < 20:
+            # 安全点：路径 A 的整段按键序列（Ctrl+L→粘贴→回车）开始前，先把暂停/结束认下来
+            fetch_gate.checkpoint()
             old = _window_title(w)
             sec_url = _detail_url_with_security(w, jid, title)
             if sec_url:
@@ -648,6 +654,8 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
                 if _page_ok(t1, title, company):
                     jd = extract_jd(page_text)
         if len(jd.strip()) < 20:
+            # 安全点：路径 B（搜索页定位 + 中键点击）开始前
+            fetch_gate.checkpoint()
             q = re.sub(r"\s+", "", (title or ""))[:20] or "招聘"
             old = _window_title(w)
             _goto(SEARCH_URL.format(q=quote(q)))
@@ -672,6 +680,9 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
             result["jd"] = jd.strip()[:MAX_JD_LEN]
         else:
             result["error"] = "原生通道已打开详情页但未解析到职位描述（页面改版或被风控）"
+    except fetch_gate.Stopped as e:
+        result["error"] = str(e)
+        result["stopped"] = True        # 让上层跳过 CDP/直连兜底，停止秒级生效
     except NativeError as e:
         result["error"] = str(e)
     except pyautogui.FailSafeException:

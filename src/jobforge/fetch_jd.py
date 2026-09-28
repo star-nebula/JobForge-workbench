@@ -8,7 +8,7 @@ FETCH_JD_MODE 环境变量：auto（默认，native→cdp）/ native / cdp。
 CDP 通道实测路径（保留）：页内 fetch 搜索 wapi 拿 securityId → 站内跳转详情页；
 注意 BOSS 反爬较激进，同一 profile 短时间大量开 tab 会被临时风控——频率是主因。
 
-用法：python fetch_jd.py <platform> <job_id> <job_url> <title> <company>
+用法：python -m jobforge.fetch_jd <platform> <job_id> <job_url> <title> <company>
 输出：stdout 一行 JSON {ok, jd?, error?, platform, job_id}
 """
 import json
@@ -19,6 +19,8 @@ import time
 import unicodedata
 
 from playwright.sync_api import sync_playwright
+
+from jobforge import fetch_gate
 
 CDP_URL = "http://localhost:9222"
 HOME = "https://www.zhipin.com/"
@@ -256,7 +258,8 @@ def _fetch_jd_cdp(job_id: str, title: str, company: str) -> dict:
 
 
 def fetch_jd(job_id: str, job_url: str, title: str, company: str) -> dict:
-    """调度：native 优先（auto/native），CDP 兜底（auto/cdp）。native 失败原因并入最终 error。"""
+    """调度：native 优先（auto/native），CDP 兜底（auto/cdp）。native 失败原因并入最终 error。
+    用户点「结束」时不再走兜底链路——立即返回 stopped 结果，让停止在秒级生效。"""
     mode = (os.environ.get("FETCH_JD_MODE") or "auto").strip().lower()
     native_err = None
     if mode in ("auto", "native"):
@@ -267,6 +270,10 @@ def fetch_jd(job_id: str, job_url: str, title: str, company: str) -> dict:
                 r["jd"] = clean_jd(r.get("jd"))
                 return r
             native_err = r.get("error") or "未知原因"
+            if r.get("stopped"):
+                return {"ok": False, "jd": None, "error": native_err, "stopped": True}
+        except fetch_gate.Stopped as e:
+            return {"ok": False, "jd": None, "error": str(e), "stopped": True}
         except Exception as e:
             native_err = f"原生通道不可用：{type(e).__name__}: {e}"
         if mode == "native":

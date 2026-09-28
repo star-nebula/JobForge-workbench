@@ -13,12 +13,13 @@
 import datetime
 import hashlib
 import json
-import os
 import sqlite3
 import time
 from typing import Dict, List, Optional
 
-DB_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "jobs.db")
+from jobforge import paths
+
+DB_FILE = paths.data("jobs.db")
 
 VALID_STATUSES = {"discovered", "reviewing", "applied", "interviewing", "rejected", "offered"}
 

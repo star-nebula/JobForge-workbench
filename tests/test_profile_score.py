@@ -1,5 +1,5 @@
 """compute_profile_score 规则引擎测试（完整度 62 + 质量 38 = 100）。"""
-from profile_score import compute_profile_score
+from jobforge.profile_score import compute_profile_score
 
 # 除 resume_text 外全真实合格的资料：62 + 技能丰富度 10 + 量化 18 = 90
 GOOD = {

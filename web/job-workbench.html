@@ -559,6 +559,7 @@
         <input placeholder="搜索岗位、公司、技能关键词…">
       </div>
       <div class="top-actions">
+        <button class="btn" id="hudBtn" title="打开置顶悬浮进度窗：抓取时显示进度与暂停/结束按钮（悬浮窗不抢焦点、鼠标点击会穿透，可放心操作）">🪟 进度悬浮窗</button>
         <button class="icon-btn" title="通知">
           <svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
         </button>
@@ -1868,10 +1869,14 @@ function _pollBatch(){
       const s=await(await fetch('/api/analyze-batch/status')).json();
       if(!s.running&&!s.done){clearInterval(_batchTimer);_batchTimer=null;chip.style.display='none';return;}
       chip.style.display='';
-      chip.textContent=s.running?`🤖 ${s.done}/${s.total} ${s.failed?`· 失败${s.failed}`:''} · ${s.current||'…'} ⏹`:`✅ 完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}（点击收起）`;
+      // 暂停/停止状态与悬浮窗同源（fetch_gate 文件闸门），两处显示始终一致
+      const gate=await(await fetch('/api/scrape-progress')).json().catch(()=>null);
+      const paused=!!(gate&&gate.paused), stopping=!!(gate&&gate.stopping);
+      const tag=stopping?' ⏹ 停止中':(paused?' ⏸ 已暂停':'');
+      chip.textContent=s.running?`🤖 ${s.done}/${s.total} ${s.failed?`· 失败${s.failed}`:''}${tag} · ${s.current||'…'} ⏹`:`✅ 完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}（点击收起）`;
       if(!s.running){
         clearInterval(_batchTimer);_batchTimer=null;
-        if(s.stop)showToast('批量分析已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
+        if(stopping)showToast('批量分析已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
         else showToast('批量分析完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
         loadJobs();
       }
@@ -1994,6 +1999,18 @@ document.getElementById('checkNativeBtn').addEventListener('click',async()=>{
   btn.disabled=false;btn.innerHTML=orig;
 });
 checkNativeStatus(); // 进入页面立即查一次
+
+// ===== 进度悬浮窗：手动打开（抓取开始时后端也会自动拉起） =====
+document.getElementById('hudBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('hudBtn');
+  btn.disabled=true;
+  try{
+    const d=await(await fetch('/api/hud/launch',{method:'POST'})).json();
+    if(!d.ok){showToast('无法打开悬浮窗',d.error||'未知错误');return;}
+    showToast('悬浮进度窗已打开',d.already_running?'窗口已在运行，位置可见屏幕右下角':'显示在屏幕右下角；抓取时会自动显示进度，可拖 ⠿ 移动位置');
+  }catch(e){showToast('无法打开悬浮窗',e.message);}
+  finally{btn.disabled=false;}
+});
 
 // ===== 抓取小窗：开关 / Tabs / 历史记录 =====
 const hideSeenToggle=document.getElementById('hideSeenToggle');
@@ -2132,6 +2149,12 @@ document.getElementById('scrapeBtn').addEventListener('click',async()=>{
     const data=await resp.json();
     lastScrapeData=data;
     renderExtract(data.keywords);
+    // 用户从悬浮窗点了「结束」：不是失败，明确提示即可
+    if(data.source==='stopped'){
+      renderScrapeError('已按你的要求结束本次抓取<br><span style="font-size:12px;color:var(--text-3)">已完成的部分不受影响，已入库岗位仍在「岗位市场」</span>',true);
+      refreshScrapeHistory();
+      return;
+    }
     // 风控/未登录时显示重试按钮
     if(data.source==='error'&&!data.jobs.length){
       renderScrapeError(`抓取失败：${data.error||''}<br><span style="font-size:12px;color:var(--text-3)">请确认 Chrome 已打开并登录 zhipin.com；多次失败可能是被风控，稍后再试</span>`,true);

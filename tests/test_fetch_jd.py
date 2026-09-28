@@ -1,5 +1,5 @@
 """clean_jd 的回归测试（对应 2026-09-25/26 的清洗规则迭代与 Decisions/JobForge-workbenchJD清洗只留正文）。"""
-from fetch_jd import clean_jd
+from jobforge.fetch_jd import clean_jd
 
 
 def test_anchor_found_tag_block_dropped():

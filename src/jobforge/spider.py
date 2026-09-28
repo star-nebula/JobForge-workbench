@@ -16,7 +16,7 @@ import time
 import hashlib
 from typing import List, Dict, Any, Optional
 
-import fetch_jd_native
+from jobforge import fetch_gate, fetch_jd_native, paths
 
 # ---------- 通用配置 ----------
 HEADERS = {
@@ -37,8 +37,8 @@ BOSS_CITY_CODES = {
     "苏州": "101190400", "全国": "100010000",
 }
 
-# Cookie 文件路径（项目根 cookies.json），由浏览器登录后写入
-COOKIES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.json")
+# Cookie 文件路径（data/cookies.json），由浏览器登录后写入
+COOKIES_FILE = paths.data("cookies.json")
 
 
 def _load_cookies(platform: str) -> Optional[Dict[str, str]]:
@@ -72,6 +72,9 @@ def crawl_boss(query: str, city: str = "全国", page: int = 1,
     city_code = BOSS_CITY_CODES.get(city, "100010000")
     try:
         data = fetch_jd_native.crawl_boss_native(query, city_code, page)
+    except fetch_gate.Stopped:
+        # 用户点了「结束」：不是失败，向上抛出由 server 转成 stopped 结果
+        raise
     except fetch_jd_native.NativeError as e:
         return {"jobs": [], "source": "error", "platform": "boss", "error": str(e)}
     except Exception as e:
