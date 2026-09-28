@@ -8,12 +8,9 @@ venv/
 data/
 
 # 浏览器登录态与凭据（敏感，绝不入库）
+# 正式位置在 data/chrome-profile（上面 data/ 已整目录排除）；这里兜底根目录旧形态
 chrome-profile/
-.chrome-cdp-profile/
 
 # 工具与临时目录
 _server.log
-.trash/
-.trashjobs_check.json
 .zcode/
-_mem_stage/

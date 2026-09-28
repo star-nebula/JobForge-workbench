@@ -73,4 +73,4 @@ venv\Scripts\python.exe -m jobforge.server
 
 ## 隐私说明
 
-`data/`（`jobs.db`、`messages.json`、`cookies.json`、`fetch_gate.json`、`hud_pos.json` 等）与浏览器 profile（`chrome-profile/`、`.chrome-cdp-profile/`）均在 `.gitignore` 中排除，不入库。
+`data/`（`jobs.db`、`messages.json`、`cookies.json`、`fetch_gate.json`、`hud_pos.json` 等）与浏览器 profile（`chrome-profile/`，正式位置 `data/chrome-profile`）均在 `.gitignore` 中排除，不入库。

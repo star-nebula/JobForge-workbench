@@ -1,0 +1,4 @@
+# Windows 批处理必须 CRLF：cmd.exe 在「chcp 切换代码页 + 多字节中文 + 裸 LF」下会解析错位
+# （实测：set "PYTHONPATH=%~dp0src" 的行首被静默吃掉 → PYTHONPATH 为空 → python -m 找不到包）
+# 带 eol 声明后，工作区若被写成 LF，git status 会显形，不再静默。
+*.bat text eol=crlf
