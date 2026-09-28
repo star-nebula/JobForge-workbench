@@ -25,15 +25,17 @@ JobForge-workbench/
 │  └─ tools/                     # 子进程脚本，由 server 以 `python -m jobforge.tools.*` 拉起
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # 前端单页（6 视图）
-├─ data/                         # 运行时数据（不入库）：jobs.db、cookies.json、messages.json、闸门/节流文件
+├─ data/                         # 运行时数据（不入库）：jobs.db、cookies.json、messages.json、闸门/节流文件、chrome-profile/
 ├─ tests/                        # pytest（92 例）
 ├─ run.bat  setup.bat  requirements.txt  README.md
-└─ chrome-profile/               # CDP 专用 Chrome profile（暂留根目录，见下）
 ```
 
 数据文件路径一律从 `paths.py` 取，不再各自用 `__file__` 推算——搬代码不会带走数据。
-`chrome-profile/` 是唯一例外：它是 CDP 调试 Chrome 的 user-data-dir（含 BOSS 登录态），
-Chrome 关掉后移入 `data/` 即完成迁移；未迁移时程序沿用旧位置并打印提示，不会丢登录态。
+CDP 调试 Chrome 的 user-data-dir（含 BOSS 登录态）也在数据目录下：`data/chrome-profile/`。
+
+注意：`.bat` 必须保持 CRLF 行尾（`.gitattributes` 已声明 `*.bat text eol=crlf`）——cmd.exe 在
+「`chcp` 切换代码页 + 中文注释 + 裸 LF」下会按字节偏移错位解析，静默吃掉 `set "PYTHONPATH=..."` 的
+行首，表现为启动时 `ModuleNotFoundError: No module named 'jobforge'`。
 
 手动启动（IDE / 命令行）需要 `src` 在 `PYTHONPATH` 里，否则 `import jobforge` 找不到：
 

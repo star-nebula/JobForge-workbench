@@ -250,26 +250,9 @@ def test_llm_config(req: LLMTestReq):
 
 
 # ---------- CDP Chrome 自动启动 ----------
+# 独立 user-data-dir（不碰日常浏览器；profile 已迁入 data/chrome-profile，含 BOSS 登录态）
+CHROME_PROFILE_DIR = paths.data("chrome-profile")
 CDP_CHECK_URL = "http://127.0.0.1:9222/json/version"
-
-
-def _chrome_profile_dir() -> str:
-    """CDP 专用 Chrome profile（独立 user-data-dir，不碰日常浏览器）。
-
-    正式位置 data/chrome-profile；旧位置（项目根 chrome-profile）里还留着登录态时
-    先沿用旧的，免得换路径后 Chrome 用空 profile 起、要重新登录 BOSS。
-    """
-    new = paths.data("chrome-profile")
-    if not os.path.isdir(new):
-        legacy = os.path.join(paths.PROJECT_ROOT, "chrome-profile")
-        if os.path.isdir(legacy):
-            print(f"[JobForge] 提示：Chrome profile 仍在旧位置 {legacy}，"
-                  f"关掉 Chrome 后移入 {new} 即完成迁移（README「目录结构」）。")
-            return legacy
-    return new
-
-
-CHROME_PROFILE_DIR = _chrome_profile_dir()
 
 
 def _find_chrome():
