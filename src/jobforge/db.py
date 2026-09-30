@@ -22,6 +22,7 @@ from jobforge import paths
 DB_FILE = paths.data("jobs.db")
 
 VALID_STATUSES = {"discovered", "reviewing", "applied", "interviewing", "rejected", "offered"}
+JD_THIN_LEN = 100   # 短于该长度的 JD 视为残缺（懒渲染空壳/误采），仅提示不计入「未获取」
 
 
 def _conn() -> sqlite3.Connection:
@@ -72,6 +73,9 @@ def init_db():
         # LLM 匹配分析结果缓存（JSON：verdict/score/strengths/gaps/advice/model）
         if "llm_analysis" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN llm_analysis TEXT")
+        # 人工确认 JD 完整（疑似残缺岗位经用户确认后计入「已获取」；重抓落库自动作废）
+        if "jd_confirmed" not in cols:
+            c.execute("ALTER TABLE seen_jobs ADD COLUMN jd_confirmed INTEGER DEFAULT 0")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_jobs(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_first_seen ON seen_jobs(first_seen_at)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_interview ON seen_jobs(interview_at)")
@@ -250,14 +254,39 @@ def set_interview(platform: str, job_id: str, interview_at: Optional[int], note:
         return _row_to_dict(r) if r else None
 
 
-def save_jd(platform: str, job_id: str, jd_text: str) -> bool:
-    """缓存岗位完整 JD 正文（详情弹窗用）。"""
+def save_jd(platform: str, job_id: str, jd_text: str, reset_confirm: bool = True) -> bool:
+    """缓存岗位完整 JD 正文（详情弹窗用）。
+
+    reset_confirm=True（重抓/首抓落库＝新内容）时同时清掉人工确认标记——旧确认只对
+    旧内容有效，用户须重新确认；清洗回写等不改变内容来源的路径传 False 保留确认。
+    """
+    with _conn() as c:
+        if reset_confirm:
+            cur = c.execute(
+                "UPDATE seen_jobs SET jd_text=?, jd_confirmed=0 WHERE platform=? AND job_id=?",
+                (jd_text, platform, job_id)
+            )
+        else:
+            cur = c.execute(
+                "UPDATE seen_jobs SET jd_text=? WHERE platform=? AND job_id=?",
+                (jd_text, platform, job_id)
+            )
+        return cur.rowcount > 0
+
+
+def set_jd_confirmed(platform: str, job_id: str, confirmed: bool = True) -> Optional[Dict]:
+    """人工确认/撤销确认 JD 完整：疑似残缺岗位经用户确认后移出「疑似残缺」、计入「已获取」。"""
     with _conn() as c:
         cur = c.execute(
-            "UPDATE seen_jobs SET jd_text=? WHERE platform=? AND job_id=?",
-            (jd_text, platform, job_id)
+            "UPDATE seen_jobs SET jd_confirmed=? WHERE platform=? AND job_id=?",
+            (1 if confirmed else 0, platform, job_id)
         )
-        return cur.rowcount > 0
+        if cur.rowcount == 0:
+            return None
+        r = c.execute(
+            "SELECT * FROM seen_jobs WHERE platform=? AND job_id=?", (platform, job_id)
+        ).fetchone()
+        return _row_to_dict(r) if r else None
 
 
 def save_job_analysis(platform: str, job_id: str, analysis: Dict) -> bool:
@@ -285,6 +314,36 @@ def list_interviews() -> Dict:
             ).fetchall()
         ]
     return {"scheduled": scheduled, "pending": pending}
+
+
+def get_jd_stats() -> Dict:
+    """岗位市场的 JD 覆盖统计：多少岗位已获取 JD、多少还没有。
+
+    「已获取」＝ jd_text 非空白；另单列 thin（正文过短且未经人工确认，疑似抓取残缺）
+    供前端提示。与岗位列表同源（seen_jobs），避免前端自己数导致口径漂移。
+    """
+    with _conn() as c:
+        total = c.execute("SELECT COUNT(*) FROM seen_jobs").fetchone()[0]
+        with_jd = c.execute(
+            "SELECT COUNT(*) FROM seen_jobs WHERE jd_text IS NOT NULL AND TRIM(jd_text) <> ''"
+        ).fetchone()[0]
+        thin = c.execute(
+            "SELECT COUNT(*) FROM seen_jobs WHERE jd_text IS NOT NULL "
+            "AND TRIM(jd_text) <> '' AND LENGTH(TRIM(jd_text)) < ? "
+            "AND COALESCE(jd_confirmed, 0) = 0",
+            (JD_THIN_LEN,),
+        ).fetchone()[0]
+        analyzed = c.execute(
+            "SELECT COUNT(*) FROM seen_jobs WHERE llm_analysis IS NOT NULL"
+        ).fetchone()[0]
+    return {
+        "total": total,
+        "with_jd": with_jd,
+        "without_jd": total - with_jd,
+        "thin": thin,
+        "analyzed": analyzed,
+        "coverage": round(with_jd / total * 100, 1) if total else 0.0,
+    }
 
 
 def get_stats() -> Dict:

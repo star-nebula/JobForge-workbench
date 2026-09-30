@@ -78,6 +78,27 @@ def test_analyze_match_requires_jd():
         analyze_match({"model": "m"}, PDATA, {"tags": [], "jd_text": ""})
 
 
+def test_analyze_match_prompt_keeps_structured_fields(monkeypatch):
+    """JD 不完整时的兜底：标题/薪资/城市/标签必须进 prompt，
+    且 system 明确要求用结构化信息补足、不得因 JD 未提及而臆断缺失。"""
+    captured = {}
+
+    def fake_chat(cfg, msgs, **kw):
+        captured["system"] = msgs[0]["content"]
+        captured["user"] = msgs[1]["content"]
+        return '{"verdict":"x","score":50,"strengths":[],"gaps":[],"advice":[]}'
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    job = {"title": "前端工程师", "company": "某公司", "salary": "",
+           "city": "", "tags": ["React"], "jd_text": "残缺的 JD"}
+    analyze_match({"model": "m"}, PDATA, job)
+    assert "【薪资】未标注" in captured["user"] and "【城市】未标注" in captured["user"]
+    assert "【岗位标签】React" in captured["user"]
+    assert "可能不完整" in captured["user"] and "残缺的 JD" in captured["user"]
+    assert "必须纳入评分" in captured["system"]
+    assert "不得仅因 JD 没写就断定岗位不具备该条件" in captured["system"]
+
+
 # ---------- polish_resume ----------
 def test_polish_resume(monkeypatch):
     monkeypatch.setattr(llm, "chat",

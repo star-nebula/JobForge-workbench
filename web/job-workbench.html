@@ -142,6 +142,24 @@
   .view-header{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:22px;flex-wrap:wrap;gap:12px}
   .view-title{font-size:22px;font-weight:700;letter-spacing:-.02em}
   .view-title small{display:block;font-size:13px;color:var(--text-3);font-weight:400;margin-top:3px}
+  /* 岗位市场：JD 覆盖统计胶囊（点击按「已获取 / 未获取」筛选） */
+  .jd-stats{display:flex;align-items:center;gap:8px;margin-top:9px;font-size:12px;flex-wrap:wrap}
+  .jd-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;border:1px solid var(--border);background:var(--bg-3);color:var(--text-2);cursor:pointer;user-select:none;transition:border-color .12s,color .12s,background .12s}
+  .jd-pill:hover{border-color:var(--border-2);color:var(--text)}
+  .jd-pill b{font-weight:700;font-size:12.5px}
+  .jd-pill.has b{color:var(--green)}
+  .jd-pill.missing b{color:var(--yellow)}
+  .jd-pill.has.active{border-color:var(--green);background:rgba(34,197,94,.12);color:#8fdcae}
+  .jd-pill.has.active b{color:#8fdcae}
+  .jd-pill.missing.active{border-color:var(--yellow);background:rgba(234,179,8,.12);color:#e6ca5e}
+  .jd-pill.missing.active b{color:#e6ca5e}
+  .jd-pill.thin b{color:var(--yellow)}
+  .jd-pill.thin.active{border-color:var(--yellow);background:rgba(234,179,8,.12);color:#e6ca5e}
+  .jd-pill.thin.active b{color:#e6ca5e}
+  .jd-pill-clear{color:var(--text-3);cursor:pointer}
+  .jd-pill-clear:hover{color:var(--text)}
+  .kcard-ai{background:rgba(59,130,246,.16);color:#7aa7f7;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;white-space:nowrap}
+  .jd-nobadge{display:inline-block;font-size:10px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
   .btn{
     display:inline-flex;align-items:center;gap:7px;
     padding:9px 16px;border-radius:10px;border:1px solid var(--border);
@@ -738,7 +756,9 @@
       <!-- ===== JOB LIST ===== -->
       <div class="view" id="jobs">
         <div class="view-header">
-          <div class="view-title">岗位市场 <small>已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small></div>
+          <div class="view-title">岗位市场 <small id="jobsSubtitle">已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small>
+            <div class="jd-stats" id="jdStats" style="display:none"></div>
+          </div>
           <div style="display:flex;gap:8px;align-items:center">
             <span id="batchChip" style="display:none;font-size:12px;color:var(--accent);background:rgba(255,122,24,.12);padding:4px 10px;border-radius:6px;cursor:pointer" title="点击停止批量分析"></span>
             <button class="btn" id="batchAnalyzeBtn" title="为没有分析结果的岗位逐个抓取 JD 并做 AI 匹配分析（每个约 30~50 秒）">🤖 AI 分析</button>
@@ -1000,6 +1020,17 @@ const KANBAN_COLS=[
 ];
 
 let jobCache=[];   // 全量岗位缓存，搜索时本地过滤
+let _jdStats=null;      // 后端 JD 覆盖统计快照
+let _jdFilter='';       // '' | 'has' | 'missing' | 'thin'：按 JD 获取情况筛选
+const JD_THIN_LEN=100;  // 与后端 db.JD_THIN_LEN 同口径
+function _hasJd(j){return !!(j&&j.jd_text&&String(j.jd_text).trim())}
+function _isThinJd(j){return _hasJd(j)&&String(j.jd_text).trim().length<JD_THIN_LEN&&!j.jd_confirmed}
+function _matchJdFilter(j){
+  if(_jdFilter==='has')return _hasJd(j);
+  if(_jdFilter==='missing')return !_hasJd(j);
+  if(_jdFilter==='thin')return _isThinJd(j);
+  return true;
+}
 function _filterJobs(jobs,q){
   const k=q.toLowerCase();
   return jobs.filter(j=>[j.title,j.company,j.city,j.salary,(j.tags||[]).join(' ')].some(f=>String(f||'').toLowerCase().includes(k)));
@@ -1013,10 +1044,53 @@ async function loadJobs(){
     const d=await r.json();
     const jobs=d.jobs||[];
     jobCache=jobs;
+    _jdStats=_computeJdStats(jobs);
+    _renderJdStats();
     _renderJobList(jobs,_searchQ());
   }catch(e){
     list.innerHTML=`<div style="text-align:center;padding:40px 20px;color:var(--red)">加载失败：${e.message}</div>`;
   }
+}
+// JD 覆盖统计：本地从列表算（列表接口已带 jd_text），无需额外请求
+function _computeJdStats(jobs){
+  let has=0,thin=0,analyzed=0;
+  for(const j of jobs){
+    if(_hasJd(j)){has++;if(_isThinJd(j))thin++;}
+    if(j.llm_analysis)analyzed++;
+  }
+  const total=jobs.length;
+  return {total,with_jd:has,without_jd:total-has,thin,analyzed,
+          coverage:total?Math.round(has/total*1000)/10:0};
+}
+function _renderJdStats(){
+  const box=document.getElementById('jdStats');
+  if(!box)return;
+  const s=_jdStats;
+  if(!s||!s.total){box.style.display='none';return;}
+  box.style.display='flex';
+  const pct=s.coverage;
+  box.innerHTML=`
+    <span style="color:var(--text-3)">JD 获取情况：</span>
+    <span class="jd-pill has ${_jdFilter==='has'?'active':''}" data-jd-filter="has" title="点击只看已获取 JD 的岗位">
+      ✓ 已获取 <b>${s.with_jd}</b>
+    </span>
+    <span class="jd-pill missing ${_jdFilter==='missing'?'active':''}" data-jd-filter="missing" title="点击只看未获取 JD 的岗位；在岗位市场点开岗位卡片会自动抓取">
+      ✗ 未获取 <b>${s.without_jd}</b>
+    </span>
+    <span style="color:var(--text-3)" title="已获取 JD 的岗位占比">覆盖率 ${pct}%</span>
+    ${s.thin?`<span class="jd-pill thin ${_jdFilter==='thin'?'active':''}" data-jd-filter="thin" title="JD 正文短于 100 字且未经人工确认：打开卡片可确认完整或重新抓取">⚠ 疑似残缺 <b>${s.thin}</b></span>`:''}
+    ${_jdFilter?`<span class="jd-pill-clear" id="jdFilterClear" title="清除筛选">✕ 清除筛选</span>`:''}
+  `;
+  box.querySelectorAll('[data-jd-filter]').forEach(el=>{
+    el.addEventListener('click',()=>{
+      const f=el.dataset.jdFilter;
+      _jdFilter=(_jdFilter===f)?'':f;
+      _renderJdStats();
+      _renderJobList(jobCache,_searchQ());
+    });
+  });
+  const clr=document.getElementById('jdFilterClear');
+  if(clr)clr.addEventListener('click',()=>{_jdFilter='';_renderJdStats();_renderJobList(jobCache,_searchQ())});
 }
 function _renderJobList(jobs,q){
   const list=document.getElementById('jobList');
@@ -1025,21 +1099,36 @@ function _renderJobList(jobs,q){
   const badge=document.getElementById('jobsNavBadge');
   if(badge){badge.textContent=jobs.length;badge.style.display='';}
   if(!jobs.length){
+    const st=document.getElementById('jdStats');if(st)st.style.display='none';
     list.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-3)"><div style="font-size:42px;margin-bottom:12px">📋</div><div style="font-size:14px">还没缓存岗位</div><div style="font-size:12px;margin-top:6px">先去「个人资料」智能抓取一次</div></div>';
     return;
   }
-  const shown=q?_filterJobs(jobs,q):jobs;
+  _renderJdStats();
+  let shown=q?_filterJobs(jobs,q):jobs;
+  if(_jdFilter)shown=shown.filter(_matchJdFilter);
+  const sub=document.getElementById('jobsSubtitle');
+  if(sub){
+    sub.innerHTML=`已缓存 <span id="jobsCount">${jobs.length}</span> 个岗位 · 按 last_seen 倒序`
+      +(_jdFilter?` · 当前显示 ${shown.length} 个（${_jdFilter==='has'?'已获取 JD':_jdFilter==='missing'?'未获取 JD':'疑似残缺 JD'}）`:'');
+  }
   if(!shown.length){
-    list.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-3)"><div style="font-size:42px;margin-bottom:12px">🔍</div><div style="font-size:14px">没有匹配「${_escHtml(q)}」的岗位</div><div style="font-size:12px;margin-top:8px;color:var(--accent);cursor:pointer" onclick="clearGlobalSearch()">清空搜索，查看全部</div></div>`;
+    list.innerHTML=`
+      <div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-3)">
+        <div style="font-size:42px;margin-bottom:12px">${_jdFilter==='missing'?'🎉':'🔍'}</div>
+        <div style="font-size:14px">${_jdFilter==='missing'?'所有岗位都已获取 JD':(_jdFilter==='has'?'还没有岗位获取到 JD':(_jdFilter==='thin'?'没有疑似残缺的 JD':`没有匹配「${_escHtml(q)}」的岗位`))}</div>
+        <div style="font-size:12px;margin-top:8px"><span style="color:var(--accent);cursor:pointer" onclick="_jdFilter='';_renderJdStats();_renderJobList(jobCache,_searchQ())">清除筛选，查看全部</span></div>
+      </div>`;
     return;
   }
   list.innerHTML=shown.map(j=>`
     <div class="kcard" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}</div>
+      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}</div>
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span>${_hl(j.salary,q)||'面议'}</span>
-        <span style="display:flex;align-items:center;gap:4px">${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span></span>
+        <span style="display:flex;align-items:center;gap:4px" title="初筛 ${j.match_score||0}＝本地规则按技能/意向/薪资/城市粗算${j.llm_analysis&&j.llm_analysis.score!=null?`；JD 精配 ${j.llm_analysis.score}＝AI 通读 JD 后结合标签/薪资/城市评分`:''}">
+          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="kcard-ai" title="JD 精配分（AI 分析）">AI ${j.llm_analysis.score}</span>`:''}
+        </span>
       </div>
       <div class="kcard-meta" style="margin-top:4px">
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(j.tags||[]).slice(0,3).map(t=>_hl(t,q)).join(' / ')}</span>
@@ -2593,7 +2682,7 @@ function _renderAnalysis(a,j){
   const lis=(arr,ico,color)=>arr.map(t=>`<div style="display:flex;gap:7px;font-size:12.5px;line-height:1.6"><span style="color:${color};flex-shrink:0">${ico}</span><span>${_escHtml(t)}</span></div>`).join('');
   return `<div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:12px;background:var(--bg-2)">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
-      <div style="font-size:20px;font-weight:700;color:${col}">${a.score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> AI 匹配</span></div>
+      <div style="font-size:20px;font-weight:700;color:${col}">${a.score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> JD 精配（AI）</span></div>
       <div style="font-size:12.5px;color:var(--text-2);flex:1">${_escHtml(a.verdict)}</div>
       <span style="font-size:10.5px;color:var(--text-3);cursor:pointer;white-space:nowrap" onclick="_runAnalysis(null,true)">重新分析</span>
     </div>
@@ -2678,7 +2767,7 @@ function renderJobDetailModal(j){
     ${j.interview_at?`<div style="background:var(--bg-3);border-left:2px solid var(--green);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px">🗓 面试：${_escHtml(_ivwCountdown(j.interview_at).text)}${j.interview_note?` · ${_escHtml(j.interview_note)}`:''}</div>`:''}
     ${j.match_score?`
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-        <div style="font-size:22px;font-weight:700;color:var(--accent-2)">${j.match_score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> 匹配度</span></div>
+        <div style="font-size:22px;font-weight:700;color:var(--accent-2)">${j.match_score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> 标签初筛</span><span style="font-size:10.5px;color:var(--text-3);font-weight:400;margin-left:8px" title="本地规则粗算，非 AI 结论；AI 通读 JD 后的「JD 精配」分见下方分析卡">≠ AI 结论</span></div>
         ${renderMiniBars(j.score_detail)}
         <div style="display:flex;gap:8px;margin-left:auto">${dimRow}</div>
       </div>
@@ -2689,6 +2778,7 @@ function renderJobDetailModal(j){
     <div id="jdText" style="font-size:13px;line-height:1.8;color:var(--text-2);white-space:pre-wrap;background:var(--bg-2);border:1px solid var(--border);border-radius:10px;padding:14px;min-height:60px">
       <span style="color:var(--text-3)">正在获取 JD 正文…</span>
     </div>
+    <div id="jdConfirmBox"></div>
     <div id="greetBox" style="display:none"></div>
     <div style="display:flex;gap:8px;margin-top:8px;justify-content:flex-end">
       <button class="btn" id="greetBtn" style="padding:5px 10px;font-size:11.5px" title="按岗位 JD 与个人资料生成 BOSS 打招呼语">👋 打招呼语</button>
@@ -2698,6 +2788,45 @@ function renderJobDetailModal(j){
   if(rb2)rb2.addEventListener('click',()=>loadJobJd(j, true));
   const gb=document.getElementById('greetBtn');
   if(gb)gb.addEventListener('click',()=>_runGreeting(j));
+  _renderJdConfirmBanner(j);   // 疑似残缺岗位：打开即给出人工确认入口
+}
+
+// ===== 疑似残缺 JD 的人工确认（详情弹窗内） =====
+// 打开弹窗即见：确认 → 移出「疑似残缺」计入「已获取」；重抓落库后旧确认作废，须再确认。
+function _renderJdConfirmBanner(j){
+  const box=document.getElementById('jdConfirmBox');
+  if(!box)return;
+  const short=_hasJd(j)&&String(j.jd_text||'').trim().length<JD_THIN_LEN;
+  if(!short){box.innerHTML='';return;}
+  if(j.jd_confirmed){
+    box.innerHTML=`<div style="margin-top:8px;padding:7px 12px;border:1px solid var(--border);background:var(--bg-2);border-radius:8px;font-size:12px;color:var(--text-3)">✓ 已人工确认 JD 完整（计入「已获取」；重新抓取后需再次确认）</div>`;
+    return;
+  }
+  box.innerHTML=`
+    <div style="display:flex;align-items:center;gap:10px;margin-top:8px;padding:8px 12px;border:1px solid rgba(234,179,8,.45);background:rgba(234,179,8,.07);border-radius:8px;font-size:12px;color:var(--yellow)">
+      <span style="flex:1;line-height:1.5">⚠ JD 正文不足 ${JD_THIN_LEN} 字，疑似抓取残缺。内容确实完整就点右侧确认；若信息不全请先「重新抓取 JD」，抓完仍偏短可再确认。</span>
+      <button class="btn" id="jdConfirmBtn" style="padding:4px 10px;font-size:11.5px;flex-shrink:0" title="确认当前 JD 内容完整：该岗位将移出「疑似残缺」，计入「已获取」">✓ 确认已获取完整 JD</button>
+    </div>`;
+  const btn=document.getElementById('jdConfirmBtn');
+  if(btn)btn.addEventListener('click',()=>_confirmJobJd(j));
+}
+async function _confirmJobJd(j){
+  const p=_jdModalCtx||{};
+  try{
+    const r=await fetch(`/api/jobs/${encodeURIComponent(p.platform||j.platform)}/${encodeURIComponent(String(p.job_id||j.job_id))}/jd-confirm`,{
+      method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({confirmed:true})});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    j.jd_confirmed=1;
+    const pid=String(p.job_id||j.job_id), plat=p.platform||j.platform;
+    const cached=jobCache.find(x=>String(x.job_id)===pid&&x.platform===plat);
+    if(cached)cached.jd_confirmed=1;
+    _jdStats=_computeJdStats(jobCache);
+    if(_activeViewId()==='jobs'){_renderJdStats();if(_jdFilter)_renderJobList(jobCache,_searchQ());}
+    _renderJdConfirmBanner(j);
+    showToast('已确认 JD 完整','该岗位已移出「疑似残缺」，计入「已获取」');
+  }catch(e){
+    showToast('确认失败',e.message);
+  }
 }
 async function loadJobJd(j, refresh){
   const box=document.getElementById('jdText');
@@ -2710,6 +2839,14 @@ async function loadJobJd(j, refresh){
     const d=await r.json();
     if(d.ok){
       box.textContent=d.jd;
+      // 抓取成功后同步更新本地缓存与 JD 覆盖统计（否则头部计数滞后）
+      const pid=String(p.job_id||j.job_id), plat=p.platform||j.platform;
+      const cached=jobCache.find(x=>String(x.job_id)===pid&&x.platform===plat);
+      if(cached){cached.jd_text=d.jd;if(!d.cached)cached.jd_confirmed=0;}
+      if(!d.cached){j.jd_text=d.jd;j.jd_confirmed=0;}   // 重抓＝新内容，旧的人工确认已作废
+      _jdStats=_computeJdStats(jobCache);
+      if(_activeViewId()==='jobs'){_renderJdStats();if(_jdFilter)_renderJobList(jobCache,_searchQ());}
+      _renderJdConfirmBanner(j);
       _initAnalysis(j);   // JD 就绪：有 AI 配置则自动分析（有缓存秒显），无配置整块隐藏
     }else{
       box.innerHTML=`<span style="color:var(--red);font-size:12.5px">${_escHtml(d.error||'获取失败')}</span>`;

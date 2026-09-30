@@ -26,6 +26,7 @@ FastAPI + spider.py
   POST /api/greeting           BOSS 打招呼语生成（LLM，无配置时本地模板降级）
   POST /api/polish             简历润色（LLM，只改表达不添事实）
   POST /api/match-analysis     岗位匹配分析（LLM，结果缓存 llm_analysis）
+  POST /api/jobs/{platform}/{job_id}/jd-confirm   人工确认 JD 完整（疑似残缺 → 已获取）
   POST /api/analyze-batch      批量分析：抓 JD + 分析全部缺分析岗位（后台线程）
   GET  /api/analyze-batch/status / POST .../stop   批量进度查询 / 停止
   GET  /api/scrape-progress    悬浮窗轮询：当前抓取任务进度（含暂停/停止态）
@@ -88,6 +89,10 @@ def _on_startup():
 # ---------- 请求模型 ----------
 class ResumeExtractReq(BaseModel):
     resume_text: str = Field(..., min_length=1, description="简历纯文本")
+
+
+class JdConfirmReq(BaseModel):
+    confirmed: bool = Field(True, description="true=确认 JD 完整（移出疑似残缺）；false=撤销确认")
 
 
 class CrawlReq(BaseModel):
@@ -960,6 +965,12 @@ def list_seen_jobs(status: Optional[str] = None):
     return {"jobs": db.list_jobs(status)}
 
 
+@app.get("/api/jobs/jd-stats")
+def get_jd_stats():
+    """岗位市场 JD 覆盖统计：已获取 / 未获取 JD 的岗位数（含疑似残缺计数）。"""
+    return db.get_jd_stats()
+
+
 @app.get("/api/stats")
 def get_stats():
     """看板聚合统计（总数/状态分布/匹配度分布/14 天趋势/Top5/最近动态）。"""
@@ -1124,10 +1135,10 @@ def _fetch_jd_core(job: Dict, refresh: bool = False,
     platform, job_id = job["platform"], job["job_id"]
     if job.get("jd_text") and not refresh:
         # 历史缓存可能含招聘者卡/公司介绍等冗余块（清洗上线前入库），出口兜底
-        # 清洗一次并写回，之后即为纯缓存直读
+        # 清洗一次并写回，之后即为纯缓存直读（内容来源未变，保留人工确认标记）
         jd = clean_jd(job["jd_text"])
         if jd != job["jd_text"]:
-            db.save_jd(platform, job_id, jd[:20000])
+            db.save_jd(platform, job_id, jd[:20000], reset_confirm=False)
         return {"ok": True, "jd": jd, "cached": True}
     if not job.get("url"):
         return {"ok": False, "error": "该岗位没有原始链接，无法抓取 JD"}
@@ -1225,6 +1236,18 @@ def set_interview(req: InterviewReq):
 class UpdateJobReq(BaseModel):
     status: str
     notes: Optional[str] = None
+
+
+@app.post("/api/jobs/{platform}/{job_id}/jd-confirm")
+def confirm_job_jd(platform: str, job_id: str, req: JdConfirmReq):
+    """人工确认/撤销确认 JD 完整。
+
+    疑似残缺（正文 <100 字）岗位由用户在详情弹窗核阅后确认：确认后移出「疑似残缺」、
+    计入「已获取」；重新抓取落库会自动作废旧确认（save_jd reset_confirm）。"""
+    job = db.set_jd_confirmed(platform, job_id, req.confirmed)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
 
 
 @app.patch("/api/jobs/{platform}/{job_id}")

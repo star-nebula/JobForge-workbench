@@ -133,17 +133,19 @@ def _template_greeting(brief: Dict, job: Dict) -> str:
 def analyze_match(config: Dict, pdata: Dict, job: Dict) -> Dict:
     """LLM 匹配度分析。返回 {verdict, score, strengths, gaps, advice, model}。
 
-    要求 LLM 只基于给定资料与 JD，不得臆测资料外信息。"""
+    要求 LLM 只基于给定资料与 JD，不得臆测资料外信息。JD 正文可能不完整
+    （懒渲染残缺/截断），标题/薪资/城市/标签作为硬信息必须纳入评分。"""
     brief = _profile_brief(pdata)
     tags = [str(t).strip() for t in (job.get("tags") or []) if str(t).strip()]
     jd = (job.get("jd_text") or "").strip()
     if not jd:
         raise LLMError("该岗位还没有 JD 正文，先在详情弹窗抓取 JD 再分析")
-    user = (f"【岗位】{(job.get('title') or '').strip()} · {(job.get('company') or '').strip()}"
-            f"{' · ' + str(job.get('salary')) if job.get('salary') else ''}"
-            f"{' · ' + str(job.get('city')) if job.get('city') else ''}\n"
+    user = (f"【岗位标题】{(job.get('title') or '').strip() or '未标注'} · "
+            f"{(job.get('company') or '').strip() or '未标注'}\n"
+            f"【薪资】{str(job.get('salary') or '').strip() or '未标注'}\n"
+            f"【城市】{str(job.get('city') or '').strip() or '未标注'}\n"
             f"【岗位标签】{'、'.join(tags) if tags else '（无）'}\n"
-            f"【JD 正文（截取）】\n{jd[:2500]}\n"
+            f"【JD 正文（截取，可能不完整）】\n{jd[:2500]}\n"
             f"【求职者】求职方向 {brief['target_position'] or '未填'}；"
             f"技能 {('、'.join(brief['skills'][:12])) if brief['skills'] else '未填'}；"
             f"经历 {brief['experience'][:800] or '未填'}；"
@@ -155,7 +157,10 @@ def analyze_match(config: Dict, pdata: Dict, job: Dict) -> Dict:
             '"gaps":["差距1"],"advice":["建议1"]}。'
             "score 综合技能/经验/条件给分；strengths 与 gaps 各 1~4 条且要具体到 JD 的要求；"
             "advice 给 1~3 条可执行建议（如补什么技能、面试怎么准备）。"
-            "严格基于给到的资料与 JD，不臆测资料外信息，差距不要归因于资料未提及的内容。")},
+            "岗位标题、薪资、城市、标签是可靠的硬信息，必须纳入评分，不得遗漏；"
+            "JD 正文可能被截断或不完整，JD 未提及的方面要用这些结构化信息补足判断——"
+            "不得仅因 JD 没写就断定岗位不具备该条件，也不臆测资料外信息；"
+            "若结论主要依赖标签/标题而非 JD 正文，在 verdict 里注明依据来源。")},
         {"role": "user", "content": user},
     ], temperature=0.3, max_tokens=900)
     d = parse_json(text)

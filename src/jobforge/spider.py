@@ -8,6 +8,7 @@
   view-source 同源读 joblist.json（浏览器真实登录态），旧 requests+静态
   cookie 直调已删除（stoken 失效 + 直调风控风险）
 """
+import difflib
 import json
 import os
 import random
@@ -223,52 +224,113 @@ def _split_resume_sections(text: str) -> Dict[str, str]:
     return sections
 
 
+# ---------- 匹配度计算（2026-09-30 重写：去保底/下限，修区分度） ----------
+# 技能词归一：小写 → 去掉字母/数字/中文/+#以外的符号（node.js→nodejs、spring boot→springboot）
+# → 同义词收敛（js/ts/vue3/nodejs 等指向标准形）。java 与 javascript 归一后不等，杜绝前缀假命中。
+_SKILL_SYNONYMS = {
+    "js": "javascript", "ts": "typescript", "nodejs": "node", "vuejs": "vue",
+    "vue2": "vue", "vue3": "vue", "reactjs": "react", "golang": "go",
+    "py": "python", "postgresql": "postgres", "ml": "machinelearning",
+}
+
+
+def _norm_skill(s: str) -> str:
+    t = re.sub(r"[^0-9a-z\u4e00-\u9fa5+#]", "", (s or "").lower())
+    return _SKILL_SYNONYMS.get(t, t)
+
+
+_SENIORITY_RE = re.compile(r"资深|高级|中级|初级|实习|校招|应届|专家|资深|lead|senior|junior", re.I)
+# BOSS 标签里混着「3-5年 / 本科 / xx专业 / 前端开发经验」这类要求标签——不是技能，不计入技能分母
+_REQ_TAG_RE = re.compile(r"年|届|经验|专业|学历|本科|大专|硕士|博士|在校|全职|兼职")
+# 意向岗位里的通用角色词——剥离后剩下的才是领域词（高级前端工程师 → 前端）
+_ROLE_WORD_RE = re.compile(r"工程师|架构师|开发|师|专员|经理|主管|顾问|专员|人员|岗")
+
+
+def _parse_salary_k(s: str):
+    """薪资字符串 → (min, max)，统一折算成 K；解析失败返回 None。
+
+    支持 11-13K / 2-3万 / 8千-1.2万（两端各自带单位）/ 1.3-2万 / 22-35K·13薪（取前两数）。"""
+    if not s:
+        return None
+    t = (s or "").lower().replace("，", "").replace(",", "")
+    m = re.search(r"(\d+(?:\.\d+)?)(万|千|k)?\s*[~\-～至]\s*(\d+(?:\.\d+)?)(万|千|k)?", t)
+    if not m:
+        return None
+
+    def val(num: str, unit: str) -> float:
+        v = float(num)
+        if unit == "万":
+            v *= 10.0
+        return v  # 千 / k / 缺省都按 K
+
+    lo = val(m.group(1), m.group(2) or m.group(4) or "")   # 「2-3万」：末位单位回溯作用到首位
+    hi = val(m.group(3), m.group(4) or "")
+    if lo > hi:
+        lo, hi = hi, lo
+    return lo, hi
+
+
 def calc_match_score(job: Dict, resume_keywords: Dict[str, Any]) -> Dict[str, Any]:
-    """计算岗位与简历的 4 维匹配度（P3 升级）。
+    """计算岗位与简历的 4 维匹配度（0-100 真实刻度，无保底分/无下限夹逼）。
+
+    2026-09-30 重写（原版三处失真：技能分母用简历技能数导致天花板 ~67、
+    经验维子串/前缀匹配方向失真、overall 下限 40 压扁分布）：
+    - 技能：命中岗位标签数 / 岗位标签总数（分母=岗位要求面），词归一后全等匹配；
+    - 经验：求职意向去职级词后与标题（去括注）做序列相似度分档；
+    - 薪资：区间 IoU，单位归一到 K（万/千/K 混排、小数、反向区间都兜住）；
+    - 未知输入给 50 中性分（不知道 ≠ 不匹配）。
     返回 {overall, skills_match, experience_match, salary_match, location_match, reasoning}。
-    每维度 0-100，overall 是加权平均。
     """
-    job_tags = set(t.lower() for t in job.get("tags", []))
-    job_title = job.get("title", "").lower()
-    resume_skills = [s.lower() for s in resume_keywords.get("skills", [])]
-    target = (resume_keywords.get("target_position") or "").lower()
+    job_tags = [t for t in (job.get("tags") or []) if str(t).strip()]
+    tag_norms = [_norm_skill(str(t)) for t in job_tags]
+    # 只把「技能样」标签当技能要求（滤掉 3-5年/本科/xx专业/xx经验 这类要求标签）
+    skill_tag_norms = [tn for t, tn in zip(job_tags, tag_norms) if not _REQ_TAG_RE.search(str(t))]
+    job_title = (job.get("title") or "").lower()
+    resume_skills = [str(s) for s in (resume_keywords.get("skills") or []) if str(s).strip()]
+    target = (resume_keywords.get("target_position") or "").lower().strip()
     resume_city = (resume_keywords.get("city") or "全国").lower()
     expected_salary = resume_keywords.get("expected_salary") or ""
     job_city = (job.get("city") or "").lower()
     job_salary = job.get("salary") or ""
 
-    # 1) 技能匹配度：命中的技能比例（jaccard-lite）
-    if not resume_skills:
-        skills_match = 30
+    # 1) 技能匹配度：简历技能命中「技能样」岗位标签的比例（分母=岗位技能要求数）
+    if not resume_skills or not skill_tag_norms:
+        skills_match = 50                      # 任一缺失＝无法判断，中性分
     else:
-        hits = sum(1 for s in resume_skills if any(s in t or t in s for t in job_tags))
-        skills_match = min(100, 40 + int(hits / max(1, len(resume_skills)) * 60))
+        skill_norms = [_norm_skill(s) for s in resume_skills]
+        hits = sum(1 for sn in skill_norms if sn and sn in skill_tag_norms)
+        skills_match = min(100, round(hits / len(skill_tag_norms) * 100))
 
-    # 2) 经验匹配度：目标岗位关键词命中标题
+    # 2) 经验匹配度：意向岗位剥掉职级词与通用角色词得「领域词」（前端），
+    #    领域词命中标题（且有角色词佐证）即高分；否则退回序列相似度分档
     if not target:
         experience_match = 50
     else:
-        tm = 0
-        if target in job_title: tm += 60
-        elif any(k in job_title for k in target.split() if len(k) >= 2): tm += 40
-        # 标题前 2 字（核心词）命中
-        core = target[:2]
-        if core and core in job_title: tm += 20
-        experience_match = min(100, tm + 30)
+        core = _SENIORITY_RE.sub("", target).strip(" ·-/") or target
+        domain = core
+        for w in ("工程师", "架构师", "开发", "师", "专员", "经理", "主管", "顾问", "人员", "岗"):
+            domain = domain.replace(w, "")
+        domain = domain.strip(" ·-/") or core
+        title_clean = re.sub(r"[（(【\[].*?[）)】\]]", "", job_title).strip()
+        if domain and domain in title_clean:
+            # 意向本身无角色词（如「前端」）时领域词命中即可；否则标题应有角色佐证
+            experience_match = 100 if (core == domain or _ROLE_WORD_RE.search(title_clean)) else 80
+        elif core in title_clean:
+            experience_match = 95
+        else:
+            ratio = difflib.SequenceMatcher(None, core, title_clean).ratio()
+            experience_match = (85 if ratio >= 0.65 else
+                                60 if ratio >= 0.5 else
+                                35 if ratio >= 0.35 else 10)
 
-    # 3) 薪资匹配度：期望薪资区间是否落入岗位薪资区间
-    if not expected_salary or not job_salary:
-        salary_match = 50  # 任一缺失给中分
+    # 3) 薪资匹配度：期望区间与岗位区间的 IoU（单位统一折 K）
+    r_range, j_range = _parse_salary_k(expected_salary), _parse_salary_k(job_salary)
+    if not r_range or not j_range:
+        salary_match = 50                      # 任一缺失/解析失败给中性分
     else:
-        try:
-            rmin, rmax = map(int, re.findall(r"\d+", expected_salary))
-            jmin, jmax = map(int, re.findall(r"\d+", job_salary))
-            # 区间重叠比例
-            overlap = max(0, min(rmax, jmax) - max(rmin, jmin))
-            union = max(rmax, jmax) - min(rmin, jmin)
-            salary_match = min(100, int(overlap / max(1, union) * 100)) if union > 0 else 50
-        except Exception:
-            salary_match = 50
+        overlap = max(0.0, min(r_range[1], j_range[1]) - max(r_range[0], j_range[0]))
+        union = max(r_range[1], j_range[1]) - min(r_range[0], j_range[0])
+        salary_match = round(overlap / union * 100) if union > 0 else 50
 
     # 4) 地点匹配度：期望城市 vs 岗位城市
     if resume_city == "全国" or not resume_city:
@@ -280,19 +342,24 @@ def calc_match_score(job: Dict, resume_keywords: Dict[str, Any]) -> Dict[str, An
     else:
         location_match = 30
 
-    # overall 加权：skills 35% + exp 30% + salary 20% + loc 15%
-    overall = int(skills_match * 0.35 + experience_match * 0.30 + salary_match * 0.20 + location_match * 0.15)
-    overall = max(40, min(100, overall))
+    # overall 加权：skills 35% + exp 30% + salary 20% + loc 15%（真实刻度，不设下限）
+    overall = round(skills_match * 0.35 + experience_match * 0.30
+                    + salary_match * 0.20 + location_match * 0.15)
+    overall = max(0, min(100, overall))
 
     # reasoning：拼接可解释文本
-    hit_skills = [s for s in resume_skills if any(s in t or t in s for t in job_tags)][:5]
+    skill_norms = [_norm_skill(s) for s in resume_skills]
+    hit_skills = [s for s, sn in zip(resume_skills, skill_norms)
+                  if sn and sn in skill_tag_norms][:5]
     reasons = []
     if hit_skills:
         reasons.append(f"技能命中 {len(hit_skills)} 项：{', '.join(hit_skills)}")
-    if target and target in job_title:
-        reasons.append(f"目标岗位「{target}」与标题完全匹配")
-    if expected_salary and job_salary:
-        reasons.append(f"薪资区间期望 {expected_salary} vs 岗位 {job_salary}")
+    if target:
+        core = _SENIORITY_RE.sub("", target).strip(" ·-/") or target
+        if core and core in re.sub(r"[（(【\[].*?[）)】\]]", "", job_title).strip():
+            reasons.append(f"目标岗位「{target}」与标题匹配")
+    if r_range and j_range:
+        reasons.append(f"薪资期望 {expected_salary} vs 岗位 {job_salary}")
     if resume_city != "全国" and resume_city in job_city:
         reasons.append(f"城市「{resume_city}」匹配")
     if not reasons:

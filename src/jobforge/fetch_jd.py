@@ -264,7 +264,7 @@ def fetch_jd(job_id: str, job_url: str, title: str, company: str) -> dict:
     native_err = None
     if mode in ("auto", "native"):
         try:
-            from fetch_jd_native import fetch_jd_native
+            from jobforge.fetch_jd_native import fetch_jd_native
             r = fetch_jd_native(job_id, job_url, title, company)
             if r.get("ok"):
                 r["jd"] = clean_jd(r.get("jd"))

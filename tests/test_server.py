@@ -1,14 +1,31 @@
-"""server 层纯函数测试：密钥脱敏 + 模型配置选型 + 批量分析预检（db/llm mock，不碰真实库）。"""
+"""server 层纯函数测试：密钥脱敏 + 模型配置选型 + 批量分析预检 + JD 确认端点（db/llm mock，不碰真实库）。"""
 import pytest
+from fastapi import HTTPException
 
 from jobforge import llm, server
-from jobforge.server import AnalyzeBatchReq, _get_llm_config, _mask_key
+from jobforge.server import AnalyzeBatchReq, JdConfirmReq, _get_llm_config, _mask_key
 
 
 def test_mask_key():
     assert _mask_key("sk-abcdef123456") == "****3456"
     assert _mask_key("abc") == "****"
     assert _mask_key("") == ""
+
+
+def test_jd_confirm_endpoint(monkeypatch):
+    """确认端点透传 confirmed 到 db 层；岗位不存在时 404。"""
+    seen = {}
+    monkeypatch.setattr(server.db, "set_jd_confirmed",
+                        lambda p, j, c: seen.update(args=(p, j, c)) or {"job_id": j, "jd_confirmed": 1 if c else 0})
+    job = server.confirm_job_jd("boss", "x1", JdConfirmReq())
+    assert job["jd_confirmed"] == 1 and seen["args"] == ("boss", "x1", True)
+    job = server.confirm_job_jd("boss", "x1", JdConfirmReq(confirmed=False))
+    assert job["jd_confirmed"] == 0 and seen["args"] == ("boss", "x1", False)
+
+    monkeypatch.setattr(server.db, "set_jd_confirmed", lambda p, j, c: None)
+    with pytest.raises(HTTPException) as ei:
+        server.confirm_job_jd("boss", "ghost", JdConfirmReq())
+    assert ei.value.status_code == 404
 
 
 @pytest.fixture
