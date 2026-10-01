@@ -76,6 +76,13 @@ def init_db():
         # 人工确认 JD 完整（疑似残缺岗位经用户确认后计入「已获取」；重抓落库自动作废）
         if "jd_confirmed" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN jd_confirmed INTEGER DEFAULT 0")
+        # L1 打包粗筛结果：triage_keep 为 NULL 表示尚未粗筛（与 0=判不匹配、1=值得精配三态可分）
+        if "triage_keep" not in cols:
+            c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_keep INTEGER")
+        if "triage_reason" not in cols:
+            c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_reason TEXT")
+        if "triage_at" not in cols:
+            c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_at INTEGER")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_jobs(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_first_seen ON seen_jobs(first_seen_at)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_interview ON seen_jobs(interview_at)")
@@ -295,6 +302,17 @@ def save_job_analysis(platform: str, job_id: str, analysis: Dict) -> bool:
         cur = c.execute(
             "UPDATE seen_jobs SET llm_analysis=? WHERE platform=? AND job_id=?",
             (json.dumps(analysis, ensure_ascii=False), platform, job_id)
+        )
+        return cur.rowcount > 0
+
+
+def save_job_triage(platform: str, job_id: str, keep: bool, reason: str) -> bool:
+    """落 L1 粗筛判定。三态靠 triage_keep 是否为 NULL 区分「没筛过」与「筛了判不匹配」。"""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE seen_jobs SET triage_keep=?, triage_reason=?, triage_at=? "
+            "WHERE platform=? AND job_id=?",
+            (1 if keep else 0, reason, int(time.time()), platform, job_id)
         )
         return cur.rowcount > 0
 

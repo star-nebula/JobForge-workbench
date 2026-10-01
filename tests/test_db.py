@@ -149,3 +149,26 @@ def test_jd_confirm(tmp_db):
     tmp_db.set_jd_confirmed("boss", "a", False)
     assert tmp_db.get_job("boss", "a")["jd_confirmed"] == 0
     assert tmp_db.get_jd_stats()["thin"] == 1
+
+
+def test_triage_roundtrip(tmp_db):
+    """triage_keep 三态可分：NULL=没筛过、1=值得精配、0=判不匹配。"""
+    tmp_db.upsert_jobs([_job()])
+    assert tmp_db.get_job("boss", "abc123")["triage_keep"] is None
+    assert tmp_db.save_job_triage("boss", "abc123", False, "岗位性质与方向无关") is True
+    j = tmp_db.get_job("boss", "abc123")
+    assert j["triage_keep"] == 0 and j["triage_reason"] == "岗位性质与方向无关"
+    assert isinstance(j["triage_at"], int)
+    assert tmp_db.save_job_triage("boss", "abc123", True, "方向对口") is True
+    assert tmp_db.get_job("boss", "abc123")["triage_keep"] == 1
+    assert tmp_db.save_job_triage("boss", "ghost", True, "") is False
+
+
+def test_triage_survives_rescrape(tmp_db):
+    """重新抓到同一岗位会走 UPDATE 分支，粗筛判定不能被列表 upsert 冲掉。"""
+    tmp_db.upsert_jobs([_job()])
+    tmp_db.save_job_triage("boss", "abc123", False, "方向无关")
+    tmp_db.upsert_jobs([_job(title="前端工程师（改）")])
+    j = tmp_db.get_job("boss", "abc123")
+    assert j["title"] == "前端工程师（改）"
+    assert j["triage_keep"] == 0 and j["triage_reason"] == "方向无关"

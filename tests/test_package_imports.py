@@ -38,12 +38,13 @@ def test_no_flat_sibling_imports():
 
 def test_fetch_jd_subprocess_boots():
     """按 server 的真实拉起方式引导 fetch_jd 子进程：cwd=项目根 + PYTHONPATH=src，
-    参数不足只打印错误 JSON（不触发抓取）——包级导入必须全部可解析。"""
+    参数不足只打印错误 JSON（不触发抓取）——包级导入必须全部可解析。
+    父进程按 UTF-8 解码：stdout 的 JSON 契约已钉死 UTF-8（2026-10-01，与 server 端一致）。"""
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env["PYTHONPATH"] = str(SRC)
     r = subprocess.run(
         [sys.executable, "-m", "jobforge.fetch_jd"],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         cwd=str(SRC.parent), env=env,
     )
     assert r.returncode == 0, f"子进程引导失败：{(r.stderr or '')[-500:]}"

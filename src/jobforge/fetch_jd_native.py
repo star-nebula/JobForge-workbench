@@ -740,6 +740,12 @@ def check_ready() -> dict:
 
 
 def main():
+    # stdout 是 JSON 契约：被管道接管时按系统区域设置选码（中文机 = cp936），
+    # 窗口标题里的非 GBK 字符会直接崩掉 print（同 fetch_jd.emit 的钉法）
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     if len(sys.argv) == 2 and sys.argv[1] in ("--check", "--check-json"):
         print(json.dumps(check_ready(), ensure_ascii=False))
         return

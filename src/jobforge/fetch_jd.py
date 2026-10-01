@@ -54,6 +54,12 @@ _TAG_LINE_MAX = 40  # 标签区整行长度上限（多标签拼接行）
 _KANGXI_MAP = {ord(c): unicodedata.normalize("NFKC", c)
                for c in map(chr, range(0x2F00, 0x2FD6))}
 
+# UIA 可访问性树与字体混淆留下的不可见/占位字符：U+FFFC 是页面图标与图片在文本树
+# 里的对象替换符，U+FFFD 是解码失败替换符，其余是零宽/BOM 类。它们既读不出信息，
+# 又会一路进库、进 LLM prompt、进人工确认正文，且 GBK 编不出来（2026-10-01 实测：
+# 含 U+FFFC 的 JD 在打印阶段 UnicodeEncodeError，抓取子进程 rc=1、stdout 空）。
+_JUNK_RE = re.compile("[\ufffc\ufffd\u200b-\u200f\ufeff]")
+
 
 def clean_jd(text) -> str:
     """清洗详情页全文 → 只留「岗位职责/任职要求」正文。
@@ -62,12 +68,13 @@ def clean_jd(text) -> str:
     提示/公司介绍/工商信息等冗余块；本函数按正文锚点定位起点、哨兵行截断
     终点。锚点之前的短行区是技能标签——列表抓取时 tags 字段已有（岗位卡
     chips 展示），JD 内不再保留（2026-09-26 用户决策）。Kangxi 部首映射还原
-    BOSS 字体混淆的形近字（⽤→用、⼯→工），否则中文关键词匹配会被污染。
+    BOSS 字体混淆的形近字（⽤→用、⼯→工），否则中文关键词匹配会被污染；同时剥掉
+    UIA 图标占位符与零宽字符（_JUNK_RE），正文里不留读不出信息的字符。
     幂等：已清洗文本再过一遍不变。锚点找不到时仍做哨兵截断与历史「标签：」
     前缀剥离（板块边界强，不误杀正文）；无任何哨兵则原样返回（保守）。"""
     if not text:
         return text
-    text = text.translate(_KANGXI_MAP)
+    text = _JUNK_RE.sub("", text).translate(_KANGXI_MAP)
     lines = []
     for ln in text.splitlines():
         ln = ln.strip()
@@ -286,16 +293,30 @@ def fetch_jd(job_id: str, job_url: str, title: str, company: str) -> dict:
     return r
 
 
+def emit(payload: dict) -> None:
+    """结果写 stdout 最后一行 JSON，编码固定 UTF-8。
+
+    不显式设编码时，被管道接管（server 用 stdout=PIPE 拉本子进程）的 stdout 会按
+    系统区域设置选码——中文 Windows 上即 cp936，JD 里的非 GBK 字符直接让 print
+    抛 UnicodeEncodeError：抓取其实成功了，却 rc=1、stdout 空，上层只能报「无输出」。
+    契约随区域设置漂 = 换台机器就坏，所以这里钉死。"""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    print(json.dumps(payload, ensure_ascii=False))
+
+
 def main():
     if len(sys.argv) < 4:
-        print(json.dumps({"ok": False, "error": "参数不足：fetch_jd.py <platform> <job_id> <url> <title> <company>"}, ensure_ascii=False))
+        emit({"ok": False, "error": "参数不足：fetch_jd.py <platform> <job_id> <url> <title> <company>"})
         return
     platform, job_id, url = sys.argv[1], sys.argv[2], sys.argv[3]
     title = sys.argv[4] if len(sys.argv) > 4 else ""
     company = sys.argv[5] if len(sys.argv) > 5 else ""
     r = fetch_jd(job_id, url, title, company)
     r.update({"platform": platform, "job_id": job_id})
-    print(json.dumps(r, ensure_ascii=False))
+    emit(r)
 
 
 if __name__ == "__main__":

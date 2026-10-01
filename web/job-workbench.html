@@ -160,6 +160,12 @@
   .jd-pill-clear:hover{color:var(--text)}
   .kcard-ai{background:rgba(59,130,246,.16);color:#7aa7f7;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;white-space:nowrap}
   .jd-nobadge{display:inline-block;font-size:10px;color:var(--text-3);border:1px solid var(--border);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
+  /* 智能粗筛（L1）三态标记：✓ 值得精配 / ✗ 判不匹配（悬停看理由）/ ○ 还没筛过。
+     判走的卡片压暗但不隐藏——机器判的 drop 必须留人工复核入口（2026-10-01 阶段3） */
+  .tri-keep{display:inline-block;font-size:10px;color:#4ade80;border:1px solid rgba(74,222,128,.35);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
+  .tri-drop{display:inline-block;font-size:10px;color:var(--red);border:1px solid rgba(239,68,68,.35);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
+  .tri-none{display:inline-block;font-size:10px;color:var(--text-3);border:1px dashed var(--border);border-radius:4px;padding:0 4px;margin-left:6px;vertical-align:1px}
+  .kcard.tri-dim{opacity:.52}
   .btn{
     display:inline-flex;align-items:center;gap:7px;
     padding:9px 16px;border-radius:10px;border:1px solid var(--border);
@@ -760,8 +766,12 @@
             <div class="jd-stats" id="jdStats" style="display:none"></div>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <span id="batchChip" style="display:none;font-size:12px;color:var(--accent);background:rgba(255,122,24,.12);padding:4px 10px;border-radius:6px;cursor:pointer" title="点击停止批量分析"></span>
-            <button class="btn" id="batchAnalyzeBtn" title="为没有分析结果的岗位逐个抓取 JD 并做 AI 匹配分析（每个约 30~50 秒）">🤖 AI 分析</button>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-3);cursor:pointer;white-space:nowrap" title="非期望城市的岗位（09-22/09-25 两批按全国抓的残留）默认不进列表与抓取/分析队列；取消勾选可看全部">
+              <input type="checkbox" id="onlyExpectedCity" checked style="accent-color:var(--accent)">只看期望城市
+            </label>
+            <span id="batchChip" style="display:none;font-size:12px;color:var(--accent);background:rgba(255,122,24,.12);padding:4px 10px;border-radius:6px;cursor:pointer" title="点击停止JD 精配"></span>
+            <button class="btn" id="triageBtn" title="智能粗筛（L1）：只把岗位列表里的标题/公司/城市/薪资/经验等结构化字段打包给 AI，批量判「值不值得精配」。几秒到几十秒，不抓 JD、不动键鼠、不吃 BOSS 风控；判为不匹配的岗位不会进入右边的精配队列">🧠 智能粗筛</button>
+            <button class="btn" id="batchAnalyzeBtn" title="JD 精配（L2）：逐个抓取 JD 全文并让 AI 通读打分，只为「智能粗筛」判保留的岗位花钱。每个约 30~50 秒，期间接管键鼠、吃 BOSS 风控">🤖 JD 精配</button>
             <button class="btn" id="refreshJobsBtn"><svg viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-3.5-7.1L21 8"/><path d="M21 3v5h-5"/></svg>刷新</button>
           </div>
         </div>
@@ -1020,6 +1030,7 @@ const KANBAN_COLS=[
 ];
 
 let jobCache=[];   // 全量岗位缓存，搜索时本地过滤
+let _otherCityCount=0;  // 后端告知的「被 L0 城市门槛隐藏」的岗位数
 let _jdStats=null;      // 后端 JD 覆盖统计快照
 let _jdFilter='';       // '' | 'has' | 'missing' | 'thin'：按 JD 获取情况筛选
 const JD_THIN_LEN=100;  // 与后端 db.JD_THIN_LEN 同口径
@@ -1040,10 +1051,13 @@ async function loadJobs(){
   if(!list)return;
   list.innerHTML='<div style="text-align:center;padding:40px 20px;color:var(--text-3)"><div style="font-size:30px;margin-bottom:8px">⏳</div>加载中…</div>';
   try{
-    const r=await fetch('/api/jobs');
+    const only=document.getElementById('onlyExpectedCity');
+    const allCities=!!(only&&!only.checked);
+    const r=await fetch('/api/jobs'+(allCities?'?all_cities=true':''));
     const d=await r.json();
     const jobs=d.jobs||[];
     jobCache=jobs;
+    _otherCityCount=d.other_city_count||0;
     _jdStats=_computeJdStats(jobs);
     _renderJdStats();
     _renderJobList(jobs,_searchQ());
@@ -1092,6 +1106,16 @@ function _renderJdStats(){
   const clr=document.getElementById('jdFilterClear');
   if(clr)clr.addEventListener('click',()=>{_jdFilter='';_renderJdStats();_renderJobList(jobCache,_searchQ())});
 }
+function _triCounts(jobs){
+  const c={keep:0,drop:0,none:0};
+  jobs.forEach(j=>{c[j.triage_keep===1?'keep':(j.triage_keep===0?'drop':'none')]++;});
+  return c;
+}
+function _triBadge(j){
+  if(j.triage_keep===1)return '<span class="tri-keep" title="智能粗筛（L1）：值得精配">粗筛 ✓</span>';
+  if(j.triage_keep===0)return `<span class="tri-drop" title="${_escHtml(j.triage_reason||'智能粗筛：判为不匹配')}">粗筛 ✗</span>`;
+  return '<span class="tri-none" title="还没跑智能粗筛。JD 精配队列会拦住未粗筛的岗位——先点顶部「🧠 智能粗筛」，它不抓 JD、不动键鼠">未粗筛</span>';
+}
 function _renderJobList(jobs,q){
   const list=document.getElementById('jobList');
   if(!list)return;
@@ -1108,7 +1132,13 @@ function _renderJobList(jobs,q){
   if(_jdFilter)shown=shown.filter(_matchJdFilter);
   const sub=document.getElementById('jobsSubtitle');
   if(sub){
+    const only=document.getElementById('onlyExpectedCity');
+    const hiding=!!(only&&only.checked);
+    const t=_triCounts(jobs);
     sub.innerHTML=`已缓存 <span id="jobsCount">${jobs.length}</span> 个岗位 · 按 last_seen 倒序`
+      +(_otherCityCount?` · ${hiding?'已隐藏':'含'} ${_otherCityCount} 个异地岗`:'')
+      +` · 粗筛 留<b style="color:#4ade80">${t.keep}</b>/走<b style="color:var(--red)">${t.drop}</b>`
+      +(t.none?`/未筛<b style="color:var(--text-3)">${t.none}</b>`:'')
       +(_jdFilter?` · 当前显示 ${shown.length} 个（${_jdFilter==='has'?'已获取 JD':_jdFilter==='missing'?'未获取 JD':'疑似残缺 JD'}）`:'');
   }
   if(!shown.length){
@@ -1121,13 +1151,13 @@ function _renderJobList(jobs,q){
     return;
   }
   list.innerHTML=shown.map(j=>`
-    <div class="kcard" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}</div>
+    <div class="kcard${j.triage_keep===0?' tri-dim':''}" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
+      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}${_triBadge(j)}</div>
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span>${_hl(j.salary,q)||'面议'}</span>
         <span style="display:flex;align-items:center;gap:4px" title="初筛 ${j.match_score||0}＝本地规则按技能/意向/薪资/城市粗算${j.llm_analysis&&j.llm_analysis.score!=null?`；JD 精配 ${j.llm_analysis.score}＝AI 通读 JD 后结合标签/薪资/城市评分`:''}">
-          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="kcard-ai" title="JD 精配分（AI 分析）">AI ${j.llm_analysis.score}</span>`:''}
+          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="kcard-ai" title="JD 精配分（AI 通读 JD 后打分）">AI ${j.llm_analysis.score}</span>`:''}
         </span>
       </div>
       <div class="kcard-meta" style="margin-top:4px">
@@ -1138,6 +1168,7 @@ function _renderJobList(jobs,q){
   `).join('');
 }
 const rjb=document.getElementById('refreshJobsBtn');if(rjb)rjb.addEventListener('click',loadJobs);
+const oec=document.getElementById('onlyExpectedCity');if(oec)oec.addEventListener('change',loadJobs);
 
 let kanbanCache=[];   // 看板全量岗位缓存（安排面试按钮取详情用）
 async function loadKanban(){
@@ -1145,7 +1176,7 @@ async function loadKanban(){
   if(!board)return;
   board.innerHTML='<div style="grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--text-3)"><div style="font-size:30px;margin-bottom:8px">⏳</div>加载中…</div>';
   try{
-    const r=await fetch('/api/jobs');
+    const r=await fetch('/api/jobs?all_cities=true');   // 看板是你自己的投递跟踪，不受城市门槛影响
     const d=await r.json();
     const jobs=d.jobs||[];
     kanbanCache=jobs;
@@ -1930,23 +1961,46 @@ document.getElementById('polishApplyBtn').addEventListener('click',async()=>{
   }catch(e){showToast('保存失败',e.message);}
 });
 
-// ===== 岗位市场：批量 AI 分析（抓 JD + 分析，后台线程 + 轮询进度） =====
+// ===== 岗位市场：智能粗筛（L1）——结构化字段批量判 keep/drop，同步返回汇总 =====
+let _triageRunning=false;
+document.getElementById('triageBtn').addEventListener('click',async()=>{
+  if(_triageRunning)return;
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再粗筛');return;}
+  if(!confirm('智能粗筛（L1）：把岗位列表里的标题/公司/城市/薪资/经验等结构化字段分批交给 AI，判「值不值得精配」。\n不抓 JD、不动键鼠、不吃 BOSS 风控，只花 token；判为不匹配的岗位之后不会进入「JD 精配」。\n确定开始？'))return;
+  const btn=document.getElementById('triageBtn');
+  _triageRunning=true;btn.disabled=true;btn.textContent='🧠 粗筛中…';
+  try{
+    const r=await fetch('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+    const d=await r.json();
+    if(!d.ok){showToast('粗筛未成功',d.error||'未知错误');return;}
+    if(!d.total){showToast('无需粗筛',d.message||'没有待筛岗位');return;}
+    showToast(`粗筛完成：留 ${d.kept} · 走 ${d.dropped}`,
+      `${d.total} 个岗位分 ${d.chunks} 批（模型 ${d.model||'-'}）`
+      +(d.unanswered?`；${d.unanswered} 个 AI 未给结论，按保留处理`:'')
+      +(d.skipped_other_city?`；${d.skipped_other_city} 个异地岗未参与`:''));
+    loadJobs();
+  }catch(e){showToast('粗筛请求失败',e.message);}
+  finally{_triageRunning=false;btn.disabled=false;btn.textContent='🧠 智能粗筛';}
+});
+
+// ===== 岗位市场：批量 JD 精配（抓 JD + 分析，后台线程 + 轮询进度） =====
 let _batchTimer=null;
 document.getElementById('batchAnalyzeBtn').addEventListener('click',async()=>{
   const cfgs=(await _ensureLlmConfigs()).configs||[];
-  if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再批量分析');return;}
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再JD 精配');return;}
   showToast('正在检查原生通道…','确认桌面 Chrome 已打开并登录 zhipin.com');
   const ns=await(await fetch('/api/native/status')).json().catch(()=>null);
   if(!ns||!ns.chrome_found||!ns.chrome_ready){
-    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化），再批量分析');return;
+    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化），再JD 精配');return;
   }
-  if(!confirm('将为所有还没有 AI 分析结果的岗位逐个：抓取 JD + AI 匹配分析（每个约 30~50 秒，期间会接管键鼠操作 Chrome，请不要动鼠标键盘）。\n连续 3 个失败会自动停止。确定开始？'))return;
+  if(!confirm('JD 精配（L2）：逐个抓取 JD 全文并让 AI 通读打分。\n只跑「智能粗筛」判保留的岗位——判为不匹配、以及还没粗筛过的岗位不会花这次抓取（先点左边的「🧠 智能粗筛」）。\n每个约 30~50 秒，期间会接管键鼠操作 Chrome，请不要动鼠标键盘；连续 3 个失败会自动停止。确定开始？'))return;
   try{
     const r=await fetch('/api/analyze-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const d=await r.json();
     if(!d.ok){showToast('无法开始',d.error||'未知错误');return;}
-    if(d.started===false){showToast('无需分析',d.message||'所有岗位都已有分析结果');return;}
-    showToast('批量分析已开始',`共 ${d.total} 个岗位，可切到别的页面，进度见岗位市场顶部`);
+    if(d.started===false){showToast('无需精配',d.message||'所有岗位都已有分析结果');return;}
+    showToast('JD 精配已开始',`共 ${d.total} 个岗位，可切到别的页面，进度见岗位市场顶部`);
     _pollBatch();
   }catch(e){showToast('启动失败',e.message);}
 });
@@ -1965,8 +2019,8 @@ function _pollBatch(){
       chip.textContent=s.running?`🤖 ${s.done}/${s.total} ${s.failed?`· 失败${s.failed}`:''}${tag} · ${s.current||'…'} ⏹`:`✅ 完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}（点击收起）`;
       if(!s.running){
         clearInterval(_batchTimer);_batchTimer=null;
-        if(stopping)showToast('批量分析已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
-        else showToast('批量分析完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
+        if(stopping)showToast('JD 精配已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
+        else showToast('JD 精配完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
         loadJobs();
       }
     }catch(e){}
@@ -1975,7 +2029,7 @@ function _pollBatch(){
 document.getElementById('batchChip').addEventListener('click',async()=>{
   const chip=document.getElementById('batchChip');
   if(chip.textContent.startsWith('🤖')){
-    if(!confirm('停止批量分析？已完成的部分会保留。'))return;
+    if(!confirm('停止JD 精配？已完成的部分会保留。'))return;
     chip.textContent='⏹ 停止中…';
     try{
       const d=await(await fetch('/api/analyze-batch/stop',{method:'POST'})).json();
@@ -2537,7 +2591,7 @@ async function openIvwModalPicker(){
   document.getElementById('ivwModalNote').value='';
   modal.style.display='flex';
   try{
-    const r=await fetch('/api/jobs');
+    const r=await fetch('/api/jobs?all_cities=true');   // 安排面试时要能选到任意已缓存的岗
     if(!r.ok)throw new Error('HTTP '+r.status);
     const jobs=(await r.json()).jobs||[];
     if(!jobs.length){
@@ -2661,7 +2715,7 @@ async function _initAnalysis(j){
   if(!cfgs.length){box.style.display='none';return;}
   box.style.display='';
   if(j.llm_analysis){box.innerHTML=_renderAnalysis(j.llm_analysis,j);return;}
-  box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--text-3)">🤖 AI 匹配分析中…（约 10~20 秒）</div>`;
+  box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--text-3)">🤖 JD 精配中…（约 10~20 秒）</div>`;
   await _runAnalysis(j,false,box);
 }
 async function _runAnalysis(j,refresh,box){
@@ -2671,10 +2725,10 @@ async function _runAnalysis(j,refresh,box){
     const r=await fetch('/api/match-analysis',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({platform:_jdModalCtx.platform,job_id:_jdModalCtx.jobId,refresh})});
     const d=await r.json();
-    if(!d.ok)throw new Error(d.error||'分析失败');
+    if(!d.ok)throw new Error(d.error||'精配失败');
     box.innerHTML=_renderAnalysis(d.analysis,j);
   }catch(e){
-    box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--red)">AI 分析失败：${_escHtml(e.message)} <span style="color:var(--accent);cursor:pointer" onclick="_initAnalysis({llm_analysis:null})">重试</span></div>`;
+    box.innerHTML=`<div style="padding:10px 12px;border:1px solid var(--border);border-radius:10px;font-size:12.5px;color:var(--red)">JD 精配失败：${_escHtml(e.message)} <span style="color:var(--accent);cursor:pointer" onclick="_initAnalysis({llm_analysis:null})">重试</span></div>`;
   }
 }
 function _renderAnalysis(a,j){
@@ -2684,7 +2738,7 @@ function _renderAnalysis(a,j){
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
       <div style="font-size:20px;font-weight:700;color:${col}">${a.score}<span style="font-size:11px;color:var(--text-3);font-weight:400"> JD 精配（AI）</span></div>
       <div style="font-size:12.5px;color:var(--text-2);flex:1">${_escHtml(a.verdict)}</div>
-      <span style="font-size:10.5px;color:var(--text-3);cursor:pointer;white-space:nowrap" onclick="_runAnalysis(null,true)">重新分析</span>
+      <span style="font-size:10.5px;color:var(--text-3);cursor:pointer;white-space:nowrap" onclick="_runAnalysis(null,true)">重新精配</span>
     </div>
     ${a.strengths.length?`<div style="margin-bottom:6px">${lis(a.strengths,'✓','var(--green)')}</div>`:''}
     ${a.gaps.length?`<div style="margin-bottom:6px">${lis(a.gaps,'!','var(--red)')}</div>`:''}

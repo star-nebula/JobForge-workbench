@@ -38,6 +38,38 @@ BOSS_CITY_CODES = {
     "苏州": "101190400", "全国": "100010000",
 }
 
+
+def _city_name(value: str) -> str:
+    """取城市名前段并去掉「市」后缀：「上海·闵行区」→「上海」、「杭州市」→「杭州」。"""
+    name = re.split(r"[·\s\-—]", str(value or "").strip())[0]
+    return name[:-1] if name.endswith("市") else name
+
+
+def _city_code(city: str) -> Optional[str]:
+    """城市名 → BOSS 城市编码；认不出来返回 None，由调用方显式报错。
+
+    空值与「全国/不限」→ 全国码。**不认识的名称绝不兜底成全国**：这里原来是
+    `get(city, "100010000")`，profile 还没有城市字段时静默按全国抓，09-22/09-25
+    三批（0 上海 / 67 异地）就是这么进库的（2026-09-30 核查 first_seen_at 批次）。
+    """
+    name = _city_name(city)
+    if not name or name in ("全国", "不限", "全部"):
+        return BOSS_CITY_CODES["全国"]
+    return BOSS_CITY_CODES.get(name)
+
+
+def is_same_city(job_city: str, expected_city: str) -> bool:
+    """L0 硬门槛：岗位城市是否属于期望城市（纯本地二值判定，不参与评分）。
+
+    期望城市为空/「全国/不限」→ 不限城市，一律 True。
+    岗位城市为空（抓取未给）→ True：不知道 ≠ 不匹配，与 calc_match_score 的中性分同口径。
+    """
+    exp = _city_name(expected_city)
+    if not exp or exp in ("全国", "不限", "全部"):
+        return True
+    job = _city_name(job_city)
+    return True if not job else job == exp
+
 # Cookie 文件路径（data/cookies.json），由浏览器登录后写入
 COOKIES_FILE = paths.data("cookies.json")
 
@@ -70,7 +102,12 @@ def crawl_boss(query: str, city: str = "全国", page: int = 1,
     前提：桌面 Chrome 已打开并登录 zhipin.com；抓取接管键鼠约 8~15 秒，
     与 JD 抓取共享 18~35 秒节流。use_mock 参数已废弃（保留兼容签名）。
     """
-    city_code = BOSS_CITY_CODES.get(city, "100010000")
+    city_code = _city_code(city)
+    if not city_code:
+        supported = "、".join(c for c in BOSS_CITY_CODES if c != "全国")
+        return {"jobs": [], "source": "error", "platform": "boss",
+                "error": f"城市「{city}」没有 BOSS 城市编码（可选：{supported}、全国；"
+                         f"或在个人资料里改城市）。已中止抓取，不会静默按全国搜。"}
     try:
         data = fetch_jd_native.crawl_boss_native(query, city_code, page)
     except fetch_gate.Stopped:

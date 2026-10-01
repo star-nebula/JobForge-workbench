@@ -4,7 +4,9 @@
 技能分母=岗位标签数、词归一后全等匹配；经验维去职级词做序列相似度分档；
 薪资单位归一到 K；overall 真实 0-100 无下限；未知输入给 50 中性分。
 """
-from jobforge.spider import _parse_salary_k, calc_match_score, extract_resume_keywords
+from jobforge import spider as sp
+from jobforge.spider import (_city_code, _parse_salary_k, calc_match_score,
+                             extract_resume_keywords, is_same_city)
 
 
 def test_extract_basic():
@@ -155,3 +157,47 @@ def test_match_score_reasoning_mentions_hits():
     kw = {"skills": ["React"], "target_position": "前端", "city": "上海", "expected_salary": "30-40K"}
     sd = calc_match_score(job, kw)
     assert "技能命中" in sd["reasoning"]
+
+
+# ---------- 城市编码解析 + L0 同城判定 ----------
+
+def test_city_code_normalizes_area_and_suffix():
+    assert _city_code("上海") == "101020100"
+    assert _city_code("上海市") == "101020100"
+    assert _city_code("上海·闵行区") == "101020100"
+    assert _city_code("") == "100010000"          # 未填 = 不限城市
+    assert _city_code("全国") == "100010000"
+    assert _city_code("不限") == "100010000"
+
+
+def test_city_code_unknown_is_none_not_nationwide():
+    """认不出的城市必须返回 None。旧实现兜底成全国码，profile 没有城市字段时
+    静默按全国抓了三批（67 个异地岗入库，2026-09-30 核查 first_seen_at 批次）。"""
+    assert _city_code("宁波") is None
+    assert _city_code("纽约") is None
+
+
+def test_crawl_boss_refuses_unknown_city(monkeypatch):
+    """未知城市当场报错，且绝不发起抓取（否则就是静默按全国搜）。"""
+    def boom(*a, **k):
+        raise AssertionError("未知城市不该发起原生抓取")
+    monkeypatch.setattr(sp.fetch_jd_native, "crawl_boss_native", boom)
+    r = sp.crawl_boss("前端", "宁波")
+    assert r["source"] == "error" and "没有 BOSS 城市编码" in r["error"]
+
+
+def test_crawl_boss_passes_normalized_city_code(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(sp.fetch_jd_native, "crawl_boss_native",
+                        lambda q, code, page: seen.update(code=code) or {"zpData": {"jobList": []}})
+    r = sp.crawl_boss("前端", "上海·闵行区")
+    assert seen["code"] == "101020100" and r["source"] == "real"
+
+
+def test_is_same_city():
+    assert is_same_city("上海·闵行区", "上海") is True
+    assert is_same_city("上海市", "上海") is True
+    assert is_same_city("北京·朝阳区", "上海") is False
+    assert is_same_city("", "上海") is True         # 抓取没给城市 ≠ 不匹配
+    assert is_same_city("北京", "") is True         # 没填期望城市就不设门槛
+    assert is_same_city("北京", "全国") is True

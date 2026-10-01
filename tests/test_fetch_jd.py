@@ -1,4 +1,14 @@
-"""clean_jd 的回归测试（对应 2026-09-25/26 的清洗规则迭代与 Decisions/JobForge-workbenchJD清洗只留正文）。"""
+"""clean_jd 的回归测试（对应 2026-09-25/26 的清洗规则迭代与 Decisions/JobForge-workbenchJD清洗只留正文）。
+
+外加 stdout JSON 契约的真子进程测试（2026-10-01：管道上按区域设置选码 = cp936，
+JD 里的 U+FFFC 崩掉 print，抓取成功却 rc=1、stdout 空）。
+"""
+import json
+import os
+import subprocess
+import sys
+
+from jobforge import paths
 from jobforge.fetch_jd import clean_jd
 
 
@@ -51,3 +61,34 @@ def test_kangxi_radical_normalized():
     out = clean_jd(text)
     assert "使用 React" in out
     assert "⽤" not in out
+
+
+def test_clean_jd_strips_uia_placeholders():
+    """UIA 图标占位符 U+FFFC / 替换符 U+FFFD / 零宽类：读不出信息，还会让
+    GBK 端崩掉（2026-10-01 真机），清洗时一并剥掉，正文文字必须连着。"""
+    text = "岗位职责：\n1. 前端\u200b开发\ufffc与\ufeff测试\ufffd收尾\n公司介绍 X"
+    out = clean_jd(text)
+    for junk in ("\u200b", "\ufffc", "\ufeff", "\ufffd"):
+        assert junk not in out
+    assert "前端开发与测试收尾" in out
+
+
+def _emit_child(payload):
+    """按 server 的真实拉起方式跑一个只调 emit 的子进程：stdout 是管道。
+    刻意关掉 UTF-8 模式与 PYTHONIOENCODING，让孩子落回系统区域码（中文机 = cp936）
+    ——那才是事故现场，不然测试在任何机器上都恒过。"""
+    code = "from jobforge import fetch_jd; fetch_jd.emit(%r)" % (payload,)
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+    env.update({"PYTHONUTF8": "0", "PYTHONPATH": paths.SRC_DIR})
+    return subprocess.run([sys.executable, "-c", code], capture_output=True,
+                          timeout=120, cwd=paths.PROJECT_ROOT, env=env)
+
+
+def test_emit_writes_utf8_json_over_pipe():
+    """emit 的契约：管道 + 非 GBK 字符也要 rc=0 且吐得出 UTF-8 JSON。
+    修复前这里是 rc=1 + stdout 空（UnicodeEncodeError），上层只能报「抓取超时」。"""
+    p = _emit_child({"ok": True, "jd": "岗位职责：\n1. 做\ufffc图标与中文测试"})
+    assert p.returncode == 0, p.stderr.decode("utf-8", "replace")[-400:]
+    data = json.loads(p.stdout.decode("utf-8"))
+    assert data["jd"].count("\ufffc") == 1        # emit 只钉编码，不删内容（删是 clean_jd 的活）
