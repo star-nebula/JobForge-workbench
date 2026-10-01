@@ -543,6 +543,15 @@ def _detail_url_with_security(w, job_id: str, title: str):
         return None
 
 
+def _source_text(w) -> str:
+    """view-source 页正文：TextPattern 优先（零输入事件、不占剪贴板），
+    拿到的不像 JSON 再走剪贴板通道。"""
+    txt = _page_text_uia(w)
+    if '{"code"' not in txt:
+        txt = _copy_page_text(w)
+    return txt
+
+
 def _extract_json_from_source(txt: str) -> dict:
     """从 view-source 页面可见文本还原 joblist.json 的 JSON 对象。
     view-source 渲染文本常带行号前缀（如「1{」「12  {」），TextPattern 与剪贴板
@@ -554,7 +563,7 @@ def _extract_json_from_source(txt: str) -> dict:
     if start < 0:
         start = txt.find("{")
     if start < 0:
-        raise NativeError("view-source 页未读到 JSON 内容（可能未登录或被风控）")
+        raise NativeError("页面文本里没有任何 JSON 起点（'{'）——读到的不是接口响应正文")
     candidates = [txt[start:]]
     stripped = "\n".join(re.sub(r"^\s*\d+\s?", "", ln) for ln in txt[start:].split("\n"))
     candidates.append(stripped)
@@ -593,10 +602,20 @@ def crawl_boss_native(query: str, city_code: str, page: int = 1) -> dict:
         t = _wait_title(w, old, timeout_s=15)
         if "about:blank" in t:
             raise NativeError("view-source 页被弹成 about:blank（反爬软锁），过段时间再试")
-        # TextPattern 优先（零输入事件、不占剪贴板），拿到的不像 JSON 再走剪贴板通道
-        txt = _page_text_uia(w)
+        txt = _source_text(w)
+        nav_ok = t != old
+        if '{"code"' not in txt and not nav_ok:
+            # 标题没离开原页 = 地址栏导航没落地（键鼠注入被焦点抢走），读到的是旧页面正文。
+            # 实测这类失败占多数（2026-10-01 上海列表抓取复测），重试一次再判失败。
+            old = _window_title(w)
+            _goto("view-source:" + api)
+            nav_ok = _wait_title(w, old, timeout_s=15) != old
+            txt = _source_text(w)
         if '{"code"' not in txt:
-            txt = _copy_page_text(w)
+            raise NativeError(
+                "列表页导航未生效（Ctrl+L/粘贴/回车没落到 Chrome，多半是前台焦点被抢），重试一次仍失败"
+                if not nav_ok else
+                "已导航到 view-source 页但页面上没有 JSON 正文（可能被重定向/未登录/风控挑战页）")
         data = _extract_json_from_source(txt)
         if data.get("code") != 0:
             raise NativeError(f"boss code={data.get('code')} msg={data.get('message', '')}（未登录或被风控）")
