@@ -2,6 +2,8 @@
 
 本地求职工作台：简历 → 关键词 → 岗位抓取（BOSS 直聘）→ 匹配度排序，一条龙单机工具。
 
+![数据看板](docs/screenshots/dashboard.png)
+
 ## 功能
 
 - **个人资料**：简历上传解析、字段比对采纳、本地规则评分与优化建议、简历预览、导出 PDF
@@ -26,12 +28,17 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # 前端单页（6 视图）
 ├─ data/                         # 运行时数据（不入库）：jobs.db、cookies.json、messages.json、闸门/节流文件、chrome-profile/
-├─ tests/                        # pytest（92 例）
+├─ tests/                        # pytest 回归（`venv\Scripts\python.exe -m pytest tests/`；例数不进文档，以现跑为准）
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
 数据文件路径一律从 `paths.py` 取，不再各自用 `__file__` 推算——搬代码不会带走数据。
 CDP 调试 Chrome 的 user-data-dir（含 BOSS 登录态）也在数据目录下：`data/chrome-profile/`。
+
+投递状态只有一张词汇表：前端 `STATUS_META`（看板列、详情弹窗状态选择器、仪表盘管道都从它派生），
+后端 `db.VALID_STATUSES`。两者同集合、且每个状态都有可达的写库入口，由
+`tests/test_frontend_status_contract.py` 钉住——曾经声明 6 态、看板只渲染 4 列，
+`rejected`/`offered` 在 UI 上无从设置，库里 114 岗于是只剩两个值。
 
 注意：`.bat` 必须保持 CRLF 行尾（`.gitattributes` 已声明 `*.bat text eol=crlf`）——cmd.exe 在
 「`chcp` 切换代码页 + 中文注释 + 裸 LF」下会按字节偏移错位解析，静默吃掉 `set "PYTHONPATH=..."` 的
