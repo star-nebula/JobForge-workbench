@@ -41,6 +41,23 @@ def test_job_status_validation(tmp_db):
     assert tmp_db.update_job_status("boss", "nope", "applied") is None
 
 
+def test_terminal_statuses_roundtrip(tmp_db):
+    """两个终态可写、可改判，并计入仪表盘 status_dist（前端曾根本没有通向它们的路径）。"""
+    tmp_db.upsert_jobs([_job()])
+    assert tmp_db.update_job_status("boss", "abc123", "rejected")["status"] == "rejected"
+    assert tmp_db.update_job_status("boss", "abc123", "offered")["status"] == "offered"
+    dist = tmp_db.get_stats()["status_dist"]
+    assert dist["offered"] == 1 and dist["rejected"] == 0 and dist["discovered"] == 0
+
+
+def test_notes_none_keeps_and_empty_clears(tmp_db):
+    """notes=None 只改状态不动备注；空串才是清除（弹窗改状态时不能顺手抹掉用户备注）。"""
+    tmp_db.upsert_jobs([_job()])
+    tmp_db.update_job_status("boss", "abc123", "applied", "内推人：李工")
+    assert tmp_db.update_job_status("boss", "abc123", "interviewing")["notes"] == "内推人：李工"
+    assert tmp_db.update_job_status("boss", "abc123", "interviewing", "")["notes"] == ""
+
+
 def test_interview_sets_status(tmp_db):
     tmp_db.upsert_jobs([_job()])
     job = tmp_db.set_interview("boss", "abc123", 1770000000000, "二面 · 现场")

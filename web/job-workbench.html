@@ -485,7 +485,9 @@
   }
 
   /* ===== P1: Kanban + 已缓存岗位列表 ===== */
-  .kanban{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;min-height:60vh}
+  .kanban{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;min-height:60vh}
+  /* 窄屏降列必须写在本行之后：上面 @media 里的 .kanban 曾被这条同特异度规则覆盖，形同虚设 */
+  @media(max-width:1100px){.kanban{grid-template-columns:repeat(2,1fr)}}
   .kcol{background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);display:flex;flex-direction:column;min-height:300px}
   .kcol-head{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;font-size:13px;font-weight:600}
   .kcol-count{background:var(--bg-3);padding:2px 8px;border-radius:8px;font-size:11px;color:var(--text-2)}
@@ -500,6 +502,19 @@
   .kcard-score{font-weight:700;color:var(--accent-2)}
   .kcard-new{display:inline-block;background:var(--accent);color:#0b0d12;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;margin-left:6px}
   .kcard-empty{text-align:center;padding:24px 8px;color:var(--text-3);font-size:12px}
+  /* 投递终态：看板和岗位市场共用同一套角标口径 */
+  .kcard-term{display:inline-block;font-size:10px;font-weight:700;padding:1px 6px;border-radius:4px;margin-left:6px;vertical-align:1px;white-space:nowrap}
+  .kcard-term.rejected{background:rgba(239,68,68,.14);color:#f87171}
+  .kcard-term.offered{background:rgba(234,179,8,.16);color:#eab308}
+  .job-reject{padding:2px 8px;font-size:10.5px;color:var(--text-3);border-color:var(--border)}
+  .job-reject:hover{color:var(--red);border-color:var(--red)}
+  /* 详情弹窗的状态选择器 + 备注（后端早收 notes，前端一直没发） */
+  .jd-status{display:flex;flex-wrap:wrap;gap:5px;margin-top:10px}
+  .jd-status-btn{font-size:11px;padding:3px 9px;border-radius:6px;border:1px solid var(--border);background:var(--bg-3);color:var(--text-3);cursor:pointer;font-family:inherit}
+  .jd-status-btn:hover{border-color:var(--text-3);color:var(--text-2)}
+  .jd-status-btn.on{color:#0b0d12;font-weight:700;border-color:transparent}
+  .jd-notes{display:flex;gap:8px;align-items:center;margin-top:10px}
+  .jd-notes input{flex:1;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:7px 9px;border-radius:8px;font-size:12.5px;font-family:inherit;min-width:0}
   .job-list-item{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;justify-content:space-between;align-items:center;gap:12px}
   .job-list-item:hover{border-color:var(--border-2)}
   .job-list-item .is-new-pill{background:var(--accent);color:#0b0d12;font-size:10px;font-weight:700;padding:2px 6px;border-radius:5px}
@@ -1022,12 +1037,51 @@ document.querySelectorAll('.nav-item').forEach(item=>{
 });
 
 // ===== P1: 已缓存岗位列表 + Kanban 拖拽 =====
-const KANBAN_COLS=[
+// 投递状态词汇表 = 全页唯一事实源，看板列 / 弹窗状态组 / 仪表盘管道都从它派生
+// （此前看板只渲染其中 4 个，另 2 个终态在 UI 上无从设置 —— 声明与可达集合分叉就是这么来的）
+const STATUS_META=[
   {key:'discovered',name:'已发现',color:'#9aa4b8'},
   {key:'reviewing',name:'评估中',color:'#3b82f6'},
   {key:'applied',name:'已投递',color:'#a855f7'},
-  {key:'interviewing',name:'面试中',color:'#22c55e'}
+  {key:'interviewing',name:'面试中',color:'#22c55e'},
+  {key:'rejected',name:'不合适',color:'#ef4444'},
+  {key:'offered',name:'已 Offer',color:'#eab308'}
 ];
+const STATUS_BY_KEY=Object.fromEntries(STATUS_META.map(s=>[s.key,s]));
+const TERMINAL_KEYS=['rejected','offered'];
+const _isTerminal=j=>TERMINAL_KEYS.includes(j&&j.status);
+
+// 过程 4 阶段一状态一列；两个终态合并成「已结束」一列，列内靠角标区分
+const KANBAN_COLS=[
+  ...STATUS_META.slice(0,4).map(s=>({key:s.key,name:s.name,color:s.color,statuses:[s.key],drop:s.key})),
+  {key:'ended',name:'已结束',color:'#ef4444',statuses:TERMINAL_KEYS,drop:'rejected'}
+];
+
+// 状态/备注写库：PATCH 之后同步本地缓存，再让当前视图各自重渲染（不重新拉全量、不触发抓 JD）
+async function _patchJob(platform,jobId,patch,toast){
+  try{
+    const r=await fetch(`/api/jobs/${encodeURIComponent(platform)}/${encodeURIComponent(jobId)}`,
+      {method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const job=await r.json();
+    _syncJobCache(job);
+    if(toast)showToast(toast[0],toast[1]||`${job.title||''} → ${_statusName(job.status)}`);
+    const v=document.querySelector('.view.active');
+    if(v&&v.id==='pipeline')renderKanban();
+    if(v&&v.id==='jobs')_renderJobList(jobCache,_searchQ());
+    return job;
+  }catch(e){
+    showToast('更新失败','写库失败：'+e.message);
+    return null;
+  }
+}
+const _statusName=s=>STATUS_BY_KEY[s]?STATUS_BY_KEY[s].name:(s||'未设置');
+function _syncJobCache(job){
+  [jobCache,kanbanCache].forEach(arr=>{
+    const i=arr.findIndex(x=>x.platform===job.platform&&String(x.job_id)===String(job.job_id));
+    if(i>=0)arr[i]={...arr[i],...job};
+  });
+}
 
 let jobCache=[];   // 全量岗位缓存，搜索时本地过滤
 let _otherCityCount=0;  // 后端告知的「被 L0 城市门槛隐藏」的岗位数
@@ -1152,7 +1206,7 @@ function _renderJobList(jobs,q){
   }
   list.innerHTML=shown.map(j=>`
     <div class="kcard${j.triage_keep===0?' tri-dim':''}" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}${_triBadge(j)}</div>
+      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}${_triBadge(j)}${_termBadge(j)}</div>
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span>${_hl(j.salary,q)||'面议'}</span>
@@ -1163,7 +1217,12 @@ function _renderJobList(jobs,q){
       <div class="kcard-meta" style="margin-top:4px">
         <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(j.tags||[]).slice(0,3).map(t=>_hl(t,q)).join(' / ')}</span>
       </div>
-      <div style="margin-top:6px"><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:10.5px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" style="width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>查看原始岗位</a></div>
+      <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:6px">
+        <a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:10.5px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" style="width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>查看原始岗位</a>
+        ${_isTerminal(j)
+          ?`<button class="btn job-reject kcard-term-toggle" data-platform="${j.platform}" data-job-id="${j.job_id}" data-to="${j.status==='offered'?'rejected':'offered'}" title="改判终态">${j.status==='offered'?'改判不合适':'改判已 Offer'}</button>`
+          :`<button class="btn job-reject" data-act="reject" data-platform="${j.platform}" data-job-id="${j.job_id}" title="判为不合适并归档（可在详情弹窗改回）">✗ 不合适</button>`}
+      </div>
     </div>
   `).join('');
 }
@@ -1178,26 +1237,31 @@ async function loadKanban(){
   try{
     const r=await fetch('/api/jobs?all_cities=true');   // 看板是你自己的投递跟踪，不受城市门槛影响
     const d=await r.json();
-    const jobs=d.jobs||[];
-    kanbanCache=jobs;
-    board.innerHTML=KANBAN_COLS.map(col=>{
-      const items=jobs.filter(j=>(j.status||'discovered')===col.key);
+    kanbanCache=d.jobs||[];
+    renderKanban();
+  }catch(e){
+    board.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--red)">加载失败：${e.message}</div>`;
+  }
+}
+// 从缓存渲染（改状态后即时反映，不必再拉一次全量）
+function renderKanban(){
+  const board=document.getElementById('kanbanBoard');
+  if(!board)return;
+  board.innerHTML=KANBAN_COLS.map(col=>{
+      const items=kanbanCache.filter(j=>col.statuses.includes(j.status||'discovered'));
       return `
         <div class="kcol">
           <div class="kcol-head">
             <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col.color};margin-right:6px"></span>${col.name}</span>
             <span class="kcol-count">${items.length}</span>
           </div>
-          <div class="kcol-body" data-status="${col.key}">
-            ${items.length?items.map(j=>renderKanbanCard(j)).join(''):'<div class="kcard-empty">拖卡片到这</div>'}
+          <div class="kcol-body" data-status="${col.drop}"${col.key==='ended'?' title="拖进来即记为「不合适」；拿到 Offer 请点卡片上的「改判已 Offer」，或在详情弹窗里选状态"':''}>
+            ${items.length?items.map(j=>renderKanbanCard(j)).join(''):`<div class="kcard-empty">${col.key==='ended'?'不合适 / 已 Offer 归档到这里':'拖卡片到这'}</div>`}
           </div>
         </div>
       `;
     }).join('');
     attachDragHandlers();
-  }catch(e){
-    board.innerHTML=`<div style="grid-column:1/-1;text-align:center;padding:40px 20px;color:var(--red)">加载失败：${e.message}</div>`;
-  }
 }
 
 function renderKanbanCard(j){
@@ -1205,19 +1269,27 @@ function renderKanbanCard(j){
     ?`<span style="display:inline-block;font-size:10px;font-weight:700;color:${_ivwCountdown(j.interview_at).color};background:var(--bg-3);padding:1px 6px;border-radius:4px">🗓 ${_ivwCountdown(j.interview_at).text}</span>`:'';
   return `
     <div class="kcard" draggable="true" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title"><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none" onclick="event.stopPropagation()">${j.title||''}</a></div>
+      <div class="kcard-title"><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none" onclick="event.stopPropagation()">${j.title||''}</a>${_termBadge(j)}</div>
       <div class="kcard-co">${j.company||''} · ${j.city||''}</div>
       ${ivwBadge?`<div style="margin-bottom:6px">${ivwBadge}</div>`:''}
       <div class="kcard-meta">
         <span>${j.salary||'面议'}</span>
         <span style="display:flex;align-items:center;gap:4px">${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span></span>
       </div>
-      <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between">
+      <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:6px">
         <a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:10.5px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" style="width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>查看原始岗位</a>
-        <button class="btn kcard-ivw" data-platform="${j.platform}" data-job-id="${j.job_id}" style="padding:3px 8px;font-size:10.5px" title="安排面试时间">${j.interview_at?'改时间':'🗓 面试'}</button>
+        <span style="display:flex;gap:6px;align-items:center;flex-shrink:0">
+          ${_isTerminal(j)?`<button class="btn kcard-term-toggle" data-platform="${j.platform}" data-job-id="${j.job_id}" data-to="${j.status==='offered'?'rejected':'offered'}" style="padding:3px 8px;font-size:10.5px" title="两个终态同列，用这个按钮改判">${j.status==='offered'?'改判不合适':'改判已 Offer'}</button>`:''}
+          <button class="btn kcard-ivw" data-platform="${j.platform}" data-job-id="${j.job_id}" style="padding:3px 8px;font-size:10.5px" title="安排面试时间">${j.interview_at?'改时间':'🗓 面试'}</button>
+        </span>
       </div>
     </div>
   `;
+}
+function _termBadge(j){
+  if(j.status==='offered')return '<span class="kcard-term offered" title="终态：已拿到 Offer">✓ 已 Offer</span>';
+  if(j.status==='rejected')return '<span class="kcard-term rejected" title="终态：已判不合适">✗ 不合适</span>';
+  return '';
 }
 
 function attachDragHandlers(){
@@ -1240,6 +1312,8 @@ function attachDragHandlers(){
       openIvwModal(j);
     });
   });
+  // 终态改判按钮走 document 级委托（见底部弹窗 IIFE）：看板与岗位市场两处都有该按钮，
+  // 在这里按 innerHTML 重新 querySelectorAll 绑定会漏掉另一侧的新卡片
   document.querySelectorAll('.kcol-body').forEach(body=>{
     body.addEventListener('dragover',e=>{e.preventDefault();body.classList.add('drag-over');});
     body.addEventListener('dragleave',()=>body.classList.remove('drag-over'));
@@ -1248,30 +1322,13 @@ function attachDragHandlers(){
       body.classList.remove('drag-over');
       let data;
       try{data=JSON.parse(e.dataTransfer.getData('text/plain'));}catch(_){return;}
-      const newStatus=body.dataset.status;
-      try{
-        const r=await fetch(`/api/jobs/${data.platform}/${data.job_id}`,{
-          method:'PATCH',
-          headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({status:newStatus})
-        });
-        if(r.ok)loadKanban();
-        else showToast('更新失败',`状态变更失败：HTTP ${r.status}`);
-      }catch(err){showToast('更新失败',err.message);}
+      await _patchJob(data.platform,data.job_id,{status:body.dataset.status},['状态已更新',null]);
     });
   });
 }
 const rkb=document.getElementById('refreshKanbanBtn');if(rkb)rkb.addEventListener('click',loadKanban);
 
-// ===== Dashboard（/api/stats 真实聚合）=====
-const STATUS_META=[
-  {key:'discovered',name:'已发现',color:'#9aa4b8'},
-  {key:'reviewing',name:'评估中',color:'#3b82f6'},
-  {key:'applied',name:'已投递',color:'#a855f7'},
-  {key:'interviewing',name:'面试中',color:'#22c55e'},
-  {key:'rejected',name:'不合适',color:'#ef4444'},
-  {key:'offered',name:'已 Offer',color:'#eab308'}
-];
+// ===== Dashboard（/api/stats 真实聚合，状态词汇复用顶部 STATUS_META）=====
 
 async function loadDashboard(){
   try{
@@ -2659,14 +2716,15 @@ async function _ivwModalSubmit(clear){
 const iab=document.getElementById('ivwAddBtn');if(iab)iab.addEventListener('click',openIvwModalPicker);
 
 // ===== 岗位详情弹窗（岗位市场 / 看板 / 面试日程 / 抓取结果共用）=====
-const JD_STATUS_NAME={discovered:'已发现',reviewing:'评估中',applied:'已投递',interviewing:'面试中',rejected:'不合适',offered:'已拿 offer'};
 let _jdModalCtx=null;   // {platform, job_id}
+let _jdModalJob=null;   // 弹窗当前岗位快照（改状态/备注后就地重绘头部用）
 async function openJobDetail(platform, jobId){
   const modal=document.getElementById('jobDetailModal');
   const head=document.getElementById('jdModalHead');
   const body=document.getElementById('jdModalBody');
   if(!modal)return;
   _jdModalCtx={platform, jobId:String(jobId)};
+  _jdModalJob=null;   // 换岗位即清快照，避免加载失败时头部还留着上一个岗的状态
   head.innerHTML='';
   body.innerHTML='<div style="text-align:center;padding:30px 0;color:var(--text-3)"><div style="font-size:26px;margin-bottom:8px">⏳</div>加载岗位信息…</div>';
   document.getElementById('jdModalLink').href='#';
@@ -2799,6 +2857,26 @@ function _skillCompareHtml(tags){
     </div>
   </div>`;
 }
+// 弹窗头部（含状态选择器与备注）：改状态后就地重绘，不重新拉 JD（拉 JD 要花键鼠额度）
+function _jdHeadHtml(j){
+  const cur=j.status||'discovered';
+  return `
+    <div style="font-size:17px;font-weight:700;line-height:1.4">${_escHtml(j.title||'(无标题)')}${_termBadge(j)}</div>
+    <div style="font-size:13px;color:var(--text-2);margin-top:4px">${_escHtml(j.company||'')} · ${_escHtml(j.city||'')}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center">
+      ${j.salary?`<span style="color:var(--accent-2);font-weight:700;font-size:13px">${_escHtml(j.salary)}</span>`:''}
+      ${j.experience?`<span style="font-size:11px;color:var(--text-3);background:var(--bg-3);padding:2px 8px;border-radius:5px">${_escHtml(j.experience)}</span>`:''}
+      ${j.education?`<span style="font-size:11px;color:var(--text-3);background:var(--bg-3);padding:2px 8px;border-radius:5px">${_escHtml(j.education)}</span>`:''}
+    </div>
+    <div class="jd-status" title="投递状态：点击即写库，看板与岗位市场同步">
+      ${STATUS_META.map(s=>`<button class="jd-status-btn${s.key===cur?' on':''}" data-status="${s.key}"${s.key===cur?` style="background:${s.color}"`:''}>${s.name}</button>`).join('')}
+    </div>
+    <div class="jd-notes">
+      <input id="jdNotesInput" placeholder="备注：投了哪版简历、内推人、HR 回复到哪一步…" value="${_escHtml(j.notes||'')}">
+      <button class="btn" id="jdNotesSave" style="padding:6px 12px;font-size:12px">保存备注</button>
+    </div>
+    ${(j.tags||[]).length?`<div style="display:flex;flex-wrap:wrap;gap:5px;margin:10px 0 2px">${j.tags.slice(0,10).map(t=>`<span style="font-size:11px;color:var(--accent);border:1px solid var(--border);padding:2px 8px;border-radius:5px">${_escHtml(t)}</span>`).join('')}</div>`:''}`;
+}
 function renderJobDetailModal(j){
   const head=document.getElementById('jdModalHead');
   const body=document.getElementById('jdModalBody');
@@ -2807,16 +2885,8 @@ function renderJobDetailModal(j){
   const dims=j.score_detail||{};
   const dimRow=[['技',dims.skills_match],['经',dims.experience_match],['薪',dims.salary_match],['城',dims.location_match]]
     .map(([n,v])=>`<span style="font-size:11px;color:var(--text-3)">${n} ${v==null?'-':v}</span>`).join('');
-  head.innerHTML=`
-    <div style="font-size:17px;font-weight:700;line-height:1.4">${_escHtml(j.title||'(无标题)')}</div>
-    <div style="font-size:13px;color:var(--text-2);margin-top:4px">${_escHtml(j.company||'')} · ${_escHtml(j.city||'')}</div>
-    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center">
-      ${j.salary?`<span style="color:var(--accent-2);font-weight:700;font-size:13px">${_escHtml(j.salary)}</span>`:''}
-      ${j.experience?`<span style="font-size:11px;color:var(--text-3);background:var(--bg-3);padding:2px 8px;border-radius:5px">${_escHtml(j.experience)}</span>`:''}
-      ${j.education?`<span style="font-size:11px;color:var(--text-3);background:var(--bg-3);padding:2px 8px;border-radius:5px">${_escHtml(j.education)}</span>`:''}
-      ${j.status?`<span style="font-size:11px;color:var(--text-2);background:var(--bg-3);padding:2px 8px;border-radius:5px">${JD_STATUS_NAME[j.status]||j.status}</span>`:''}
-    </div>
-    ${(j.tags||[]).length?`<div style="display:flex;flex-wrap:wrap;gap:5px;margin:10px 0 2px">${j.tags.slice(0,10).map(t=>`<span style="font-size:11px;color:var(--accent);border:1px solid var(--border);padding:2px 8px;border-radius:5px">${_escHtml(t)}</span>`).join('')}</div>`:''}`;
+  _jdModalJob=j;
+  head.innerHTML=_jdHeadHtml(j);
   body.innerHTML=`
     ${j.interview_at?`<div style="background:var(--bg-3);border-left:2px solid var(--green);border-radius:6px;padding:8px 12px;font-size:12.5px;margin-bottom:12px">🗓 面试：${_escHtml(_ivwCountdown(j.interview_at).text)}${j.interview_note?` · ${_escHtml(j.interview_note)}`:''}</div>`:''}
     ${j.match_score?`
@@ -2922,6 +2992,42 @@ async function loadJobJd(j, refresh){
     const card=e.target.closest('[data-job-id][data-platform]');
     if(!card)return;
     openJobDetail(card.dataset.platform, card.dataset.jobId);
+  });
+  // 岗位市场卡片的快捷归档与终态改判（看板/岗位市场两处都有，走 document 级委托）
+  // 114 个岗里绝大多数终态就是「不合适」，这条必须有捷径；两终态同列，改判靠这个按钮
+  document.addEventListener('click',e=>{
+    const b=e.target.closest('[data-act="reject"],.kcard-term-toggle');
+    if(!b)return;
+    const to=b.dataset.to||'rejected';
+    _patchJob(b.dataset.platform,b.dataset.jobId,{status:to},[b.dataset.to?'已改判':'已归档',null]);
+  });
+  // 弹窗头部：状态选择器 + 备注（后端一直收 notes，前端此前从未发送过）
+  const jdHead=document.getElementById('jdModalHead');
+  async function _patchFromModal(patch,toastTitle){
+    if(!_jdModalCtx)return;
+    const job=await _patchJob(_jdModalCtx.platform,_jdModalCtx.jobId,patch,toastTitle);
+    if(job){
+      _jdModalJob={...(_jdModalJob||{}),...job};
+      jdHead.innerHTML=_jdHeadHtml(_jdModalJob);
+    }
+  }
+  jdHead.addEventListener('click',e=>{
+    const sBtn=e.target.closest('.jd-status-btn');
+    if(sBtn){
+      const st=sBtn.dataset.status;
+      if(_jdModalJob&&st===(_jdModalJob.status||'discovered'))return;
+      // 备注框里有未保存的字就一并提交，别让改状态把草稿吞掉
+      const ni=document.getElementById('jdNotesInput');
+      const patch={status:st};
+      if(ni&&ni.value!==((_jdModalJob&&_jdModalJob.notes)||''))patch.notes=ni.value;
+      _patchFromModal(patch,['状态已更新',null]);
+      return;
+    }
+    if(e.target.closest('#jdNotesSave')){
+      const ni=document.getElementById('jdNotesInput');
+      if(!ni)return;
+      _patchFromModal({status:(_jdModalJob&&_jdModalJob.status)||'discovered',notes:ni.value},['已保存','备注已写入库']);
+    }
   });
 })();
 
