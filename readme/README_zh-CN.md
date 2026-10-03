@@ -4,6 +4,8 @@
 
 本地求职工作台：简历 → 关键词 → 岗位抓取（BOSS 直聘）→ 匹配度排序，一条龙单机工具。
 
+> **平台要求：仅支持 Windows 10/11。** 原生抓取通道依赖 Windows UI 自动化（pywinauto / UIA TextPattern）与键鼠自动化（pyautogui / pygetwindow），且这些仅 Windows 可用的库在 server 启动的 import 链上——macOS/Linux 下 server 无法启动。另需桌面版 Chrome 与 Python 3.10+。
+
 ![数据看板](../docs/screenshots/dashboard.png)
 
 ## 功能
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # 前端单页（6 视图）
 ├─ data/                         # 运行时数据（不入库）：jobs.db、cookies.json、messages.json、闸门/节流文件、chrome-profile/
-├─ tests/                        # pytest 回归（`venv\Scripts\python.exe -m pytest tests/`；例数不进文档，以现跑为准）
+├─ tests/                        # pytest 回归（先 `pip install -r requirements-dev.txt`，再 `venv\Scripts\python.exe -m pytest tests/`；例数不进文档，以现跑为准）
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 

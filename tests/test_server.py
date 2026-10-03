@@ -316,16 +316,18 @@ def _ids(rows):
     return [r["job_id"] for r in rows]
 
 
-def test_analyze_queue_gates_by_triage():
+def test_analyze_queue_gates_by_triage(monkeypatch):
     """没筛过的岗同样拦下：否则新抓的一批整批绕过门禁，门等于没装。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
     jobs, stats = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq())
     assert _ids(jobs) == ["k1"]
     assert stats == {"skipped_other_city": 1, "skipped_dropped": 1,
                      "skipped_untriaged": 1, "skipped_analyzed": 1}
 
 
-def test_analyze_queue_include_dropped_bypasses_triage():
+def test_analyze_queue_include_dropped_bypasses_triage(monkeypatch):
     """include_dropped 用于人工复核粗筛：drop 与未筛都放行，但城市门与已分析照旧。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
     jobs, stats = server._analyze_queue([dict(r) for r in _QROWS],
                                         AnalyzeBatchReq(include_dropped=True))
     assert _ids(jobs) == ["k1", "d1", "u1"]
@@ -333,8 +335,9 @@ def test_analyze_queue_include_dropped_bypasses_triage():
     assert stats["skipped_analyzed"] == 1 and stats["skipped_other_city"] == 1
 
 
-def test_analyze_queue_force_and_limit():
+def test_analyze_queue_force_and_limit(monkeypatch):
     """force 只放开「已分析」这一轴，不放开粗筛门（两个轴语义不同，不能合一个开关）。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
     jobs, _ = server._analyze_queue([dict(r) for r in _QROWS],
                                     AnalyzeBatchReq(force=True))
     assert _ids(jobs) == ["k1", "k2"]

@@ -4,6 +4,8 @@
 
 ローカルで完結する求人活動ワークベンチ：履歴書 → キーワード → 求人スクレイピング（BOSS直聘）→ マッチ度ランキングを一気通貫で行う単体ツールです。
 
+> **プラットフォーム要件：Windows 10/11 のみ対応。** ネイティブスクレイピングは Windows UI オートメーション（pywinauto / UIA TextPattern）とキーボード・マウス操作の自動化（pyautogui / pygetwindow）に依存しており、これらの Windows 専用ライブラリはサーバー起動時の import で読み込まれるため、macOS/Linux ではサーバー自体が起動しません。デスクトップ版 Chrome と Python 3.10+ も必要です。
+
 ![ダッシュボード](../docs/screenshots/dashboard.png)
 
 ## 機能
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # フロントエンド単一ページ（6 ビュー）
 ├─ data/                         # 実行時データ（コミット対象外）：jobs.db、cookies.json、messages.json、ゲート/スロットルファイル、chrome-profile/
-├─ tests/                        # pytest 回帰テスト（`venv\Scripts\python.exe -m pytest tests/`。件数はドキュメントに書かず実行で確認）
+├─ tests/                        # pytest 回帰テスト（先に `pip install -r requirements-dev.txt` を実行してから `venv\Scripts\python.exe -m pytest tests/`。件数はドキュメントに書かず実行で確認）
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 

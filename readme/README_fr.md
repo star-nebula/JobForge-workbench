@@ -4,6 +4,8 @@
 
 Atelier de recherche d'emploi local : CV → mots-clés → scraping d'offres (BOSS Zhipin) → classement par compatibilité, le tout dans un outil mono-poste intégré.
 
+> **Plateforme : Windows 10/11 uniquement.** Le canal de scraping natif pilote Chrome de bureau via Windows UI Automation (pywinauto / UIA TextPattern) et l'automatisation clavier-souris (pyautogui / pygetwindow) ; ces bibliothèques réservées à Windows sont importées au démarrage du serveur — sur macOS/Linux, le serveur ne démarre pas. Chrome de bureau et Python 3.10+ sont également requis.
+
 ![Tableau de bord](../docs/screenshots/dashboard.png)
 
 ## Fonctionnalités
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # Page unique du frontend (6 vues)
 ├─ data/                         # Données d'exécution (non versionnées) : jobs.db, cookies.json, messages.json, fichiers de porte/limitation, chrome-profile/
-├─ tests/                        # Régressions pytest (`venv\Scripts\python.exe -m pytest tests/` ; le nombre de tests n'est pas documenté — exécutez-les pour le voir)
+├─ tests/                        # Régressions pytest (`pip install -r requirements-dev.txt` d'abord, puis `venv\Scripts\python.exe -m pytest tests/` ; le nombre de tests n'est pas documenté — exécutez-les pour le voir)
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 

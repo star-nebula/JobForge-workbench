@@ -4,6 +4,8 @@
 
 A local job-hunting workbench: resume → keywords → job scraping (BOSS Zhipin) → match ranking, all in one single-machine pipeline.
 
+> **Platform: Windows 10/11 only.** The native scraping channel drives desktop Chrome through Windows UI Automation (pywinauto / UIA TextPattern) plus keyboard-and-mouse automation (pyautogui / pygetwindow), and the server imports these Windows-only libraries at startup — on macOS/Linux it will not even boot. Desktop Chrome and Python 3.10+ are also required.
+
 ![Dashboard](docs/screenshots/dashboard.png)
 
 ## Features
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # Frontend single page (6 views)
 ├─ data/                         # Runtime data (not committed): jobs.db, cookies.json, messages.json, gate/throttle files, chrome-profile/
-├─ tests/                        # pytest regression suite (`venv\Scripts\python.exe -m pytest tests/`; test counts are not documented here — run them to see)
+├─ tests/                        # pytest regression suite (`pip install -r requirements-dev.txt` first, then `venv\Scripts\python.exe -m pytest tests/`; test counts are not documented here — run them to see)
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 

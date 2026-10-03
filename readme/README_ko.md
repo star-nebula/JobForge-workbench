@@ -4,6 +4,8 @@
 
 로컬에서 완결되는 구직 워크벤치: 이력서 → 키워드 → 채용공고 스크래핑(BOSS Zhipin) → 매칭도 랭킹까지 하나의 단일 머신 도구로 처리합니다.
 
+> **플랫폼 요구 사항: Windows 10/11만 지원.** 네이티브 스크래핑 채널은 Windows UI 자동화(pywinauto / UIA TextPattern)와 키보드·마우스 자동화(pyautogui / pygetwindow)에 의존하며, 이러한 Windows 전용 라이브러리는 서버 시작 시 import되므로 macOS/Linux에서는 서버 자체가 실행되지 않습니다. 데스크톱 Chrome과 Python 3.10+도 필요합니다.
+
 ![대시보드](../docs/screenshots/dashboard.png)
 
 ## 기능
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # 프론트엔드 단일 페이지(6개 뷰)
 ├─ data/                         # 런타임 데이터(커밋하지 않음): jobs.db, cookies.json, messages.json, 게이트/스로틀 파일, chrome-profile/
-├─ tests/                        # pytest 회귀 테스트(`venv\Scripts\python.exe -m pytest tests/`; 테스트 수는 문서에 적지 않고 실행으로 확인)
+├─ tests/                        # pytest 회귀 테스트(먼저 `pip install -r requirements-dev.txt` 실행 후 `venv\Scripts\python.exe -m pytest tests/`; 테스트 수는 문서에 적지 않고 실행으로 확인)
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 

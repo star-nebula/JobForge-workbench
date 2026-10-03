@@ -4,6 +4,8 @@
 
 Lokale Bewerbungs-Werkbank: Lebenslauf → Keywords → Job-Scraping (BOSS Zhipin) → Match-Ranking, alles in einem Einzelplatz-Tool.
 
+> **Plattform: nur Windows 10/11.** Der native Scraping-Kanal steuert Desktop-Chrome über Windows UI Automation (pywinauto / UIA TextPattern) und Tastatur-Maus-Automatisierung (pyautogui / pygetwindow); diese nur unter Windows verfügbaren Bibliotheken werden beim Serverstart importiert — unter macOS/Linux startet der Server gar nicht. Zudem sind Desktop-Chrome und Python 3.10+ erforderlich.
+
 ![Dashboard](../docs/screenshots/dashboard.png)
 
 ## Funktionen
@@ -30,7 +32,7 @@ JobForge-workbench/
 │     └─ hud.py  messages.py  grab_cookies.py
 ├─ web/job-workbench.html        # Frontend-Einzelseite (6 Ansichten)
 ├─ data/                         # Laufzeitdaten (nicht im Repo): jobs.db, cookies.json, messages.json, Gate-/Throttle-Dateien, chrome-profile/
-├─ tests/                        # pytest-Regression (`venv\Scripts\python.exe -m pytest tests/`; die Testanzahl wird nicht dokumentiert — ausführen zum Zählen)
+├─ tests/                        # pytest-Regression (zuerst `pip install -r requirements-dev.txt`, dann `venv\Scripts\python.exe -m pytest tests/`; die Testanzahl wird nicht dokumentiert — ausführen zum Zählen)
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
