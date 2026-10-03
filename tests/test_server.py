@@ -137,7 +137,7 @@ def _stub_triage(monkeypatch, rows=_ROWS, keep=lambda jid: jid != "c"):
     monkeypatch.setattr(server.db, "save_job_triage",
                         lambda p, j, k, r: saved.append((j, k, r)))
     monkeypatch.setattr(server.llm, "triage_jobs",
-                        lambda cfg, pdata, jobs, chunk_size: [
+                        lambda cfg, pdata, jobs, chunk_size, progress=None: [
                             {"platform": "boss", "job_id": j["job_id"],
                              "keep": keep(j["job_id"]), "reason": "r", "answered": True}
                             for j in jobs])
@@ -198,7 +198,7 @@ def test_triage_llm_error_does_not_write(monkeypatch):
     """整块解析失败时抛 LLMError → 端点报错回用户，不得把岗位静默写成 drop。"""
     saved = _stub_triage(monkeypatch)
 
-    def boom(cfg, pdata, jobs, chunk_size):
+    def boom(cfg, pdata, jobs, chunk_size, progress=None):
         raise llm.LLMError("LLM 未返回 JSON")
     monkeypatch.setattr(server.llm, "triage_jobs", boom)
     r = server.start_triage(TriageReq())
@@ -586,3 +586,70 @@ def test_scrape_query_blank_falls_back_to_resume(monkeypatch):
         ScrapeFromResumeReq(resume_text=_RESUME, query="   "))
     assert r["query_used"] == "高级前端工程师"
     assert seen["query"] == "高级前端工程师"
+
+
+# ---------- B1：粗筛并发锁 + 预览 + 进度（2026-10-03，全同步接口防连点/防刷新重复起跑） ----------
+
+def _triage_env(monkeypatch, rows=None):
+    """粗筛端点环境 stub：模型可达、db 走内存行、triage_jobs 换成不碰 LLM 的桩。"""
+    monkeypatch.setattr(server, "_get_llm_config",
+                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
+    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
+    monkeypatch.setattr(server.db, "save_job_triage", lambda *a, **k: None)
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    monkeypatch.setattr(server.db, "list_jobs", lambda status=None: rows if rows is not None else [])
+    calls = {}
+    def fake_triage(cfg, pdata, jobs, chunk_size=llm.TRIAGE_CHUNK, progress=None):
+        calls["chunk_size"] = chunk_size
+        calls["progress"] = progress
+        if progress:
+            progress(len(jobs), -(-len(jobs) // chunk_size))
+        return [{"platform": "boss", "job_id": j["job_id"], "keep": True,
+                 "reason": "r", "answered": True} for j in jobs]
+    monkeypatch.setattr(server.llm, "triage_jobs", fake_triage)
+    return calls
+
+
+_TRIAGE_ROWS = [
+    {"platform": "boss", "job_id": "a1", "city": "上海", "triage_keep": None},
+    {"platform": "boss", "job_id": "a2", "city": "上海", "triage_keep": None},
+    {"platform": "boss", "job_id": "kept", "city": "上海", "triage_keep": 1},
+    {"platform": "boss", "job_id": "far", "city": "北京", "triage_keep": None},
+]
+
+
+def test_triage_preview_queue口径(monkeypatch):
+    """预览 = 队列口径只读版：未筛 2 个进队列、已粗筛 1 个排除、异地 1 个 L0 拦下。"""
+    _triage_env(monkeypatch, _TRIAGE_ROWS)
+    pv = server.triage_preview()
+    assert pv["pending"] == 2
+    assert pv["chunks"] == -(-2 // llm.TRIAGE_CHUNK)
+    assert pv["skipped_other_city"] == 1
+
+
+def test_triage_busy_lock_rejects_second_run(monkeypatch):
+    """上一轮没跑完时再点必须被服务端拒绝——前端按钮禁用态会随页面刷新丢失。"""
+    _triage_env(monkeypatch, _TRIAGE_ROWS)
+    assert server._triage_lock.acquire(blocking=False)
+    server._triage_state.update(running=True, done=0, total=0)
+    try:
+        r = server.start_triage(TriageReq())
+        assert r["busy"] is True and r["ok"] is False and "粗筛在跑" in r["error"]
+    finally:
+        server._triage_state["running"] = False
+        server._triage_lock.release()
+    # 锁释放后能正常跑完，且跑完锁必然回到释放态（finally 兜底，异常路径同样）
+    r = server.start_triage(TriageReq())
+    assert r["ok"] is True and r["total"] == 2
+    assert not server._triage_state["running"]
+
+
+def test_triage_status_reports_progress(monkeypatch):
+    """进度经 progress 回调写进 _triage_state，状态端点原样吐出。"""
+    calls = _triage_env(monkeypatch, _TRIAGE_ROWS[:2])
+    r = server.start_triage(TriageReq())
+    assert r["ok"] is True
+    assert calls["progress"] is not None          # 回调真的传给了 llm 层
+    s = server.triage_status()
+    assert s["running"] is False
+    assert s["done"] == 2 and s["total"] == -(-2 // llm.TRIAGE_CHUNK)

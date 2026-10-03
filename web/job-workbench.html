@@ -787,7 +787,7 @@
       <div class="view" id="jobs">
         <div class="view-header">
           <div class="view-title">岗位市场 <small id="jobsSubtitle">已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small>
-            <div class="jd-stats" id="jdStats" style="display:none"></div>
+            <div class="jd-stats" id="jdStats" style="display:none" title="计数与筛选按当前列表口径：受「只看期望城市」开关影响，全库口径见数据看板"></div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
             <select id="sortSel" title="排序：综合分 = AI 精配分优先、没精配的按标签初筛分；初筛分 = 本地规则分；最新发现 = 抓取入库时间" style="background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:12.5px">
@@ -1429,7 +1429,8 @@ function renderDashStat(s){
   const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
   set('statTotal',s.total||0);
   const trend=s.trend_14d||[];
-  set('statTotalDelta','近 7 天 +'+trend.slice(7).reduce((a,t)=>a+t.count,0));
+  // 口径标注（A3）：看板是全库口径（含异地岗），岗位市场默认只看期望城市——同屏数字不同要有出处
+  set('statTotalDelta',(s.other_city_count?`含异地岗 ${s.other_city_count} · `:'')+'近 7 天 +'+trend.slice(7).reduce((a,t)=>a+t.count,0));
   const spark=document.getElementById('statSpark');
   if(spark){
     const vals=trend.map(t=>t.count);
@@ -2103,16 +2104,51 @@ document.getElementById('polishApplyBtn').addEventListener('click',async()=>{
 
 // ===== 岗位市场：智能粗筛（L1）——结构化字段批量判 keep/drop，同步返回汇总 =====
 let _triageRunning=false;
+let _triagePoll=null;
+// 进度轮询（B1）：按钮实时显示第几批；页面刷新后靠 /api/triage/status 恢复显示，
+// 服务端并发锁保证就算前端状态丢了，重复起跑也只会得到 busy
+function _pollTriage(){
+  if(_triagePoll)clearInterval(_triagePoll);
+  const btn=document.getElementById('triageBtn');
+  _triagePoll=setInterval(async()=>{
+    try{
+      const s=await(await fetch('/api/triage/status')).json();
+      if(s.running){
+        btn.disabled=true;
+        btn.textContent=`🧠 粗筛中 ${s.done||0}/${s.total||'?'} 批…`;
+      }else{
+        clearInterval(_triagePoll);_triagePoll=null;
+        if(!_triageRunning){btn.disabled=false;btn.textContent='🧠 智能粗筛';loadJobs();}
+      }
+    }catch(e){}
+  },2000);
+}
+(async()=>{   // 进入页面先问一次：是否已有粗筛在跑（刷新丢状态的场景）
+  try{
+    const s=await(await fetch('/api/triage/status')).json();
+    if(s.running)_pollTriage();
+  }catch(e){}
+})();
 document.getElementById('triageBtn').addEventListener('click',async()=>{
   if(_triageRunning)return;
   const cfgs=(await _ensureLlmConfigs()).configs||[];
   if(!cfgs.length){showToast('未配置 AI 模型','点右上角 ⚙ 添加模型后再粗筛');return;}
-  if(!confirm('智能粗筛（L1）：把岗位列表里的标题/公司/城市/薪资/经验等结构化字段分批交给 AI，判「值不值得精配」。\n不抓 JD、不动键鼠、不吃 BOSS 风控，只花 token；判为不匹配的岗位之后不会进入「JD 精配」。\n确定开始？'))return;
+  // 确认前先预览：让用户知道这一下要花多少岗位、多少批（B1）
+  const pv=await(await fetch('/api/triage/preview')).json().catch(()=>null);
+  if(pv&&!pv.pending){showToast('无需粗筛','没有待筛岗位（已筛过的可在历史结果里人工翻案）');return;}
+  const pvText=pv?`共 ${pv.pending} 个待筛岗位、${pv.chunks} 批交给 AI，几分钟内完成`
+                 :'待筛岗位数未知（预览失败，仍可继续）';
+  if(!confirm(`智能粗筛（L1）：${pvText}。\n只把标题/公司/城市/薪资/经验等结构化字段打包给 AI 判「值不值得精配」——不抓 JD、不动键鼠、不吃 BOSS 风控，只花 token；判为不匹配的岗位之后不会进入「JD 精配」。\n确定开始？`))return;
   const btn=document.getElementById('triageBtn');
   _triageRunning=true;btn.disabled=true;btn.textContent='🧠 粗筛中…';
   try{
     const r=await fetch('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
     const d=await r.json();
+    if(d.busy){   // 服务端锁拒绝：另一轮在跑（页面刷新后按钮状态丢失的兜底）
+      showToast('已有粗筛在跑','进度见按钮，结束后列表会自动刷新');
+      _pollTriage();
+      return;
+    }
     if(!d.ok){showToast('粗筛未成功',d.error||'未知错误');return;}
     if(!d.total){showToast('无需粗筛',d.message||'没有待筛岗位');return;}
     showToast(`粗筛完成：留 ${d.kept} · 走 ${d.dropped}`,

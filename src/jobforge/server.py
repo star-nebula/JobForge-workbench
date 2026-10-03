@@ -571,19 +571,14 @@ class TriageReq(BaseModel):
     chunk_size: int = Field(llm.TRIAGE_CHUNK, ge=1, le=40, description="每次 LLM 调用带几个岗位")
 
 
-@app.post("/api/triage")
-def start_triage(req: TriageReq):
-    """L1 粗筛：按块把岗位的结构化字段交给 LLM 判 keep/drop，为昂贵的 JD 抓取定量。
+# B1（2026-10-03）：粗筛全程同步且烧 token——服务端并发锁防连点/防刷新后重复起跑，
+# 进度状态暴露给前端轮询（按钮文字实时显示第几批），队列口径抽出来供预览端点复用
+_triage_lock = threading.Lock()
+_triage_state = {"running": False, "done": 0, "total": 0}
 
-    与批量精配的分工：本接口只花 token（按块一次带多个岗位），不需要桌面 Chrome、
-    不接管键鼠、不吃 BOSS 风控；抓 JD 的额度约束由批量分析侧按 triage_keep 执行。"""
-    cfg = _get_llm_config(req.model_id)
-    if not cfg:
-        return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
-    try:
-        llm.chat(cfg, [{"role": "user", "content": "ping"}], timeout=15, max_tokens=5)
-    except llm.LLMError as e:
-        return {"ok": False, "error": f"模型配置不可用：{e}"}
+
+def _triage_queue(req: TriageReq) -> Tuple[List[Dict], int]:
+    """粗筛队列唯一口径：job_ids 指定 → L0 城市门槛 → 未筛过滤 → limit 截断。"""
     jobs = db.list_jobs()
     skipped_other_city = 0
     if req.job_ids:
@@ -596,22 +591,63 @@ def start_triage(req: TriageReq):
             jobs = [j for j in jobs if j.get("triage_keep") is None]
     if req.limit:
         jobs = jobs[:req.limit]
-    if not jobs:
-        return {"ok": True, "total": 0, "skipped_other_city": skipped_other_city,
-                "message": "没有需要粗筛的岗位（已筛过的可用 force 重筛）"}
-    pdata = (db.get_profile() or {}).get("data") or {}
+    return jobs, skipped_other_city
+
+
+@app.get("/api/triage/preview")
+def triage_preview(limit: Optional[int] = None, force: bool = False):
+    """粗筛前预览：待筛岗位数与批次估算，供确认框展示（不发 LLM 调用）。"""
+    jobs, skipped_other_city = _triage_queue(TriageReq(limit=limit, force=force))
+    return {"pending": len(jobs), "chunks": -(-len(jobs) // llm.TRIAGE_CHUNK) if jobs else 0,
+            "skipped_other_city": skipped_other_city}
+
+
+@app.get("/api/triage/status")
+def triage_status():
+    """粗筛进行中状态（B1）：前端轮询显示第几批；页面刷新后也能据此恢复显示。"""
+    return dict(_triage_state)
+
+
+@app.post("/api/triage")
+def start_triage(req: TriageReq):
+    """L1 粗筛：按块把岗位的结构化字段交给 LLM 判 keep/drop，为昂贵的 JD 抓取定量。
+
+    与批量精配的分工：本接口只花 token（按块一次带多个岗位），不需要桌面 Chrome、
+    不接管键鼠、不吃 BOSS 风控；抓 JD 的额度约束由批量分析侧按 triage_keep 执行。"""
+    if not _triage_lock.acquire(blocking=False):
+        return {"ok": False, "busy": True,
+                "error": "已有粗筛在跑，等当前一轮结束再点（进度见按钮）"}
     try:
-        results = llm.triage_jobs(cfg, pdata, jobs, chunk_size=req.chunk_size)
-    except llm.LLMError as e:
-        return {"ok": False, "error": str(e)}
-    for r in results:
-        db.save_job_triage(r["platform"], r["job_id"], r["keep"], r["reason"])
-    kept = sum(1 for r in results if r["keep"])
-    return {"ok": True, "total": len(results), "kept": kept,
-            "dropped": len(results) - kept,
-            "unanswered": sum(1 for r in results if not r["answered"]),
-            "skipped_other_city": skipped_other_city,
-            "chunks": -(-len(results) // req.chunk_size), "model": cfg.get("model")}
+        cfg = _get_llm_config(req.model_id)
+        if not cfg:
+            return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
+        try:
+            llm.chat(cfg, [{"role": "user", "content": "ping"}], timeout=15, max_tokens=5)
+        except llm.LLMError as e:
+            return {"ok": False, "error": f"模型配置不可用：{e}"}
+        jobs, skipped_other_city = _triage_queue(req)
+        if not jobs:
+            return {"ok": True, "total": 0, "skipped_other_city": skipped_other_city,
+                    "message": "没有需要粗筛的岗位（已筛过的可用 force 重筛）"}
+        _triage_state.update(running=True, done=0,
+                             total=-(-len(jobs) // req.chunk_size))
+        pdata = (db.get_profile() or {}).get("data") or {}
+        try:
+            results = llm.triage_jobs(cfg, pdata, jobs, chunk_size=req.chunk_size,
+                                      progress=lambda d, t: _triage_state.update(done=d, total=t))
+        except llm.LLMError as e:
+            return {"ok": False, "error": str(e)}
+        for r in results:
+            db.save_job_triage(r["platform"], r["job_id"], r["keep"], r["reason"])
+        kept = sum(1 for r in results if r["keep"])
+        return {"ok": True, "total": len(results), "kept": kept,
+                "dropped": len(results) - kept,
+                "unanswered": sum(1 for r in results if not r["answered"]),
+                "skipped_other_city": skipped_other_city,
+                "chunks": -(-len(results) // req.chunk_size), "model": cfg.get("model")}
+    finally:
+        _triage_state["running"] = False
+        _triage_lock.release()
 
 
 # ---------- 批量分析：抓 JD + 逐个 LLM 分析（后台线程，前端轮询进度） ----------
@@ -1114,8 +1150,15 @@ def get_jd_stats():
 
 @app.get("/api/stats")
 def get_stats():
-    """看板聚合统计（总数/状态分布/匹配度分布/14 天趋势/Top5/最近动态）。"""
-    return db.get_stats()
+    """看板聚合统计（总数/状态分布/匹配度分布/14 天趋势/Top5/最近动态）。
+
+    口径 = 全库（含异地岗）——看板是求职总览；岗位市场默认只看期望城市，
+    两边数字不同是设计使然，前端据此标注「含异地岗」避免同屏数字对不上（A3）。"""
+    s = db.get_stats()
+    exp = _profile_city()
+    s["other_city_count"] = sum(
+        1 for j in db.list_jobs() if not spider.is_same_city(j.get("city") or "", exp))
+    return s
 
 
 @app.get("/api/messages")

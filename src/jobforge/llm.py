@@ -269,13 +269,16 @@ def triage_chunk(config: Dict, pdata: Dict, jobs: List[Dict]) -> Dict[int, Dict]
 
 
 def triage_jobs(config: Dict, pdata: Dict, jobs: List[Dict],
-                chunk_size: int = TRIAGE_CHUNK) -> List[Dict]:
+                chunk_size: int = TRIAGE_CHUNK, progress=None) -> List[Dict]:
     """按 chunk_size 切块粗筛（每块一次 LLM 调用），返回顺序与入参一致。
 
     每项 {platform, job_id, keep, reason, answered}；模型漏答的岗位保守 keep=true
-    并置 answered=False，绝不因一次格式不对就丢岗。"""
+    并置 answered=False，绝不因一次格式不对就丢岗。progress(done, total) 每块回调一次，
+    供上层进度显示；回调抛异常不阻断筛选取向。"""
     pdata = pdata or {}
     out: List[Dict] = []
+    total_chunks = -(-len(jobs) // chunk_size) if jobs else 0
+    done = 0
     for i in range(0, len(jobs), chunk_size):
         chunk = jobs[i:i + chunk_size]
         got = triage_chunk(config, pdata, chunk)
@@ -288,4 +291,10 @@ def triage_jobs(config: Dict, pdata: Dict, jobs: List[Dict],
                 "reason": (d or {}).get("reason") or "模型未给出判定，保守保留",
                 "answered": d is not None,
             })
+        done += 1
+        if progress:
+            try:
+                progress(done, total_chunks)
+            except Exception:
+                pass
     return out
