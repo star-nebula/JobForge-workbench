@@ -83,6 +83,10 @@ def init_db():
             c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_reason TEXT")
         if "triage_at" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_at INTEGER")
+        # 粗筛通过即进流水线（2026-10-03）：keep=1 却仍停在 discovered 的岗位一律升入评估列。
+        # 幂等自愈——正常流转下不该存在这种组合，存在即说明是老库残留或手工改回。
+        c.execute("UPDATE seen_jobs SET status='reviewing' "
+                  "WHERE status='discovered' AND triage_keep=1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_jobs(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_first_seen ON seen_jobs(first_seen_at)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_interview ON seen_jobs(interview_at)")
@@ -307,12 +311,15 @@ def save_job_analysis(platform: str, job_id: str, analysis: Dict) -> bool:
 
 
 def save_job_triage(platform: str, job_id: str, keep: bool, reason: str) -> bool:
-    """落 L1 粗筛判定。三态靠 triage_keep 是否为 NULL 区分「没筛过」与「筛了判不匹配」。"""
+    """落 L1 粗筛判定。三态靠 triage_keep 是否为 NULL 区分「没筛过」与「筛了判不匹配」。
+    keep=True 同时把仍停在 discovered 的岗位升入 reviewing（粗筛通过即进投递流水线评估列，
+    2026-10-03 定稿的流转口径）；已在流水线更后段（applied/interviewing/终态）的不动。"""
     with _conn() as c:
         cur = c.execute(
-            "UPDATE seen_jobs SET triage_keep=?, triage_reason=?, triage_at=? "
+            "UPDATE seen_jobs SET triage_keep=?, triage_reason=?, triage_at=?, "
+            "status=CASE WHEN ?=1 AND status='discovered' THEN 'reviewing' ELSE status END "
             "WHERE platform=? AND job_id=?",
-            (1 if keep else 0, reason, int(time.time()), platform, job_id)
+            (1 if keep else 0, reason, int(time.time()), 1 if keep else 0, platform, job_id)
         )
         return cur.rowcount > 0
 

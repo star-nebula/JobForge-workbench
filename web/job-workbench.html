@@ -802,7 +802,7 @@
       <!-- ===== PIPELINE KANBAN ===== -->
       <div class="view" id="pipeline">
         <div class="view-header">
-          <div class="view-title">投递流水线 <small>拖拽卡片即可更新状态</small></div>
+          <div class="view-title">投递流水线 <small>粗筛通过自动进入评估列 · 拖拽卡片即可更新状态</small></div>
           <button class="btn" id="refreshKanbanBtn"><svg viewBox="0 0 24 24" style="width:14px;height:14px"><path d="M21 12a9 9 0 1 1-3.5-7.1L21 8"/><path d="M21 3v5h-5"/></svg>刷新</button>
         </div>
         <div class="kanban" id="kanbanBoard"></div>
@@ -1051,11 +1051,10 @@ const STATUS_BY_KEY=Object.fromEntries(STATUS_META.map(s=>[s.key,s]));
 const TERMINAL_KEYS=['rejected','offered'];
 const _isTerminal=j=>TERMINAL_KEYS.includes(j&&j.status);
 
-// 过程 4 阶段一状态一列；两个终态合并成「已结束」一列，列内靠角标区分
-const KANBAN_COLS=[
-  ...STATUS_META.slice(0,4).map(s=>({key:s.key,name:s.name,color:s.color,statuses:[s.key],drop:s.key})),
-  {key:'ended',name:'已结束',color:'#ef4444',statuses:TERMINAL_KEYS,drop:'rejected'}
-];
+// 流转口径（2026-10-03）：discovered 是岗位市场的归属状态，不进流水线；
+// 粗筛通过（keep=1）由后端自动升入评估列。五个流水线状态一状态一列，
+// 终态不合并——不合适与已 Offer 语义相反，合列既藏漏斗信息又会让拖放写错状态。
+const KANBAN_COLS=STATUS_META.slice(1).map(s=>({key:s.key,name:s.name,color:s.color,statuses:[s.key],drop:s.key}));
 
 // 状态/备注写库：PATCH 之后同步本地缓存，再让当前视图各自重渲染（不重新拉全量、不触发抓 JD）
 async function _patchJob(platform,jobId,patch,toast){
@@ -1255,8 +1254,8 @@ function renderKanban(){
             <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${col.color};margin-right:6px"></span>${col.name}</span>
             <span class="kcol-count">${items.length}</span>
           </div>
-          <div class="kcol-body" data-status="${col.drop}"${col.key==='ended'?' title="拖进来即记为「不合适」；拿到 Offer 请点卡片上的「改判已 Offer」，或在详情弹窗里选状态"':''}>
-            ${items.length?items.map(j=>renderKanbanCard(j)).join(''):`<div class="kcard-empty">${col.key==='ended'?'不合适 / 已 Offer 归档到这里':'拖卡片到这'}</div>`}
+          <div class="kcol-body" data-status="${col.drop}">
+            ${items.length?items.map(j=>renderKanbanCard(j)).join(''):`<div class="kcard-empty">拖卡片到这</div>`}
           </div>
         </div>
       `;
@@ -1279,7 +1278,6 @@ function renderKanbanCard(j){
       <div style="margin-top:6px;display:flex;align-items:center;justify-content:space-between;gap:6px">
         <a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-size:10.5px;text-decoration:none;display:inline-flex;align-items:center;gap:3px" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" style="width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6M10 14 21 3"/></svg>查看原始岗位</a>
         <span style="display:flex;gap:6px;align-items:center;flex-shrink:0">
-          ${_isTerminal(j)?`<button class="btn kcard-term-toggle" data-platform="${j.platform}" data-job-id="${j.job_id}" data-to="${j.status==='offered'?'rejected':'offered'}" style="padding:3px 8px;font-size:10.5px" title="两个终态同列，用这个按钮改判">${j.status==='offered'?'改判不合适':'改判已 Offer'}</button>`:''}
           <button class="btn kcard-ivw" data-platform="${j.platform}" data-job-id="${j.job_id}" style="padding:3px 8px;font-size:10.5px" title="安排面试时间">${j.interview_at?'改时间':'🗓 面试'}</button>
         </span>
       </div>
@@ -1312,8 +1310,8 @@ function attachDragHandlers(){
       openIvwModal(j);
     });
   });
-  // 终态改判按钮走 document 级委托（见底部弹窗 IIFE）：看板与岗位市场两处都有该按钮，
-  // 在这里按 innerHTML 重新 querySelectorAll 绑定会漏掉另一侧的新卡片
+  // 终态改判按钮走 document 级委托（见底部弹窗 IIFE）：岗位市场卡片上有该按钮（看板终态已拆列，
+  // 改判直接拖到另一列即可），按 innerHTML 重新 querySelectorAll 绑定会漏掉另一侧的新卡片
   document.querySelectorAll('.kcol-body').forEach(body=>{
     body.addEventListener('dragover',e=>{e.preventDefault();body.classList.add('drag-over');});
     body.addEventListener('dragleave',()=>body.classList.remove('drag-over'));

@@ -181,6 +181,31 @@ def test_triage_roundtrip(tmp_db):
     assert tmp_db.save_job_triage("boss", "ghost", True, "") is False
 
 
+def test_triage_keep_promotes_to_reviewing(tmp_db):
+    """粗筛通过自动进流水线（2026-10-03 流转定稿）：keep=1 且仍停在 discovered → reviewing。
+    只向前不回退：已在 applied 等更后段的不动；keep=0 只落判定，不改状态。"""
+    tmp_db.upsert_jobs([_job(), _job(job_id="late"), _job(job_id="dropped")])
+    tmp_db.update_job_status("boss", "late", "applied")
+    assert tmp_db.save_job_triage("boss", "abc123", True, "方向对口") is True
+    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
+    assert tmp_db.save_job_triage("boss", "late", True, "依然对口") is True
+    assert tmp_db.get_job("boss", "late")["status"] == "applied"
+    assert tmp_db.save_job_triage("boss", "dropped", False, "方向无关") is True
+    assert tmp_db.get_job("boss", "dropped")["status"] == "discovered"
+
+
+def test_init_db_backfills_triage_kept_discovered(tmp_db):
+    """启动回填幂等自愈：keep=1 却仍停在 discovered 的老库残留一律升入评估列。"""
+    tmp_db.upsert_jobs([_job()])
+    tmp_db.save_job_triage("boss", "abc123", True, "方向对口")
+    with tmp_db._conn() as c:                       # 模拟老库：判定在、状态没跟上
+        c.execute("UPDATE seen_jobs SET status='discovered' WHERE job_id='abc123'")
+    tmp_db.init_db()
+    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
+    tmp_db.init_db()                                # 再跑一遍不许抖动
+    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
+
+
 def test_triage_survives_rescrape(tmp_db):
     """重新抓到同一岗位会走 UPDATE 分支，粗筛判定不能被列表 upsert 冲掉。"""
     tmp_db.upsert_jobs([_job()])

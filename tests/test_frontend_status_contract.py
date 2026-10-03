@@ -3,6 +3,10 @@
 由来（2026-10-02 体检 A1）：前端曾声明 6 个状态、看板只渲染 4 列，`rejected`/`offered`
 在 UI 上没有任何入口可达——库里 114 岗因此只有 discovered/interviewing 两值，投递闭环断头。
 「词汇表」与「可达集合」分叉是这类缺陷的形态，本文件就是把可达性钉成断言。
+
+2026-10-03 流转定稿：discovered 是岗位市场的归属状态，不进流水线看板；
+粗筛通过（keep=1）由后端自动升入评估列；终态各自一列——曾合并成「已结束」，
+拖入即写 rejected，拿到 Offer 反而被记成不合适。
 """
 import re
 from pathlib import Path
@@ -37,14 +41,24 @@ def test_status_vocabulary_matches_db(src):
     assert src.count("const STATUS_META=") == 1
 
 
-def test_kanban_columns_cover_every_status(src):
-    """看板列的状态并集必须等于全状态：漏一个就是「有状态、没出口」。"""
+def test_kanban_columns_cover_pipeline(src):
+    """看板列 = 除 discovered 外每个状态一列：已发现归岗位市场，终态不再合并。
+
+    派生自词汇表（slice(1)）而不是另写一份——另写必然漂移，A1 就是这么来的。
+    """
     block = src[src.index("const KANBAN_COLS="):]
-    block = block[:block.index("];")]
-    assert "STATUS_META.slice(0,4)" in block        # 过程 4 列从词汇表派生，不另写一份
-    assert "statuses:TERMINAL_KEYS" in block        # 终态合并进「已结束」一列
+    block = block[:block.index(";")]
+    assert "STATUS_META.slice(1)" in block
+    assert "TERMINAL_KEYS" not in block            # 终态各自一列，没有「已结束」合并列
+    assert "discovered" not in block               # 已发现不渲染成看板列
+    assert src.count("const KANBAN_COLS=") == 1
     keys = _status_meta_keys(src)
-    assert set(keys[:4]) | _terminal_keys(src) == set(keys)
+    assert keys[0] == "discovered"                 # slice(1) 跳过的必须正是它
+    assert set(keys[1:]) == set(keys) - {"discovered"}
+
+
+def test_terminal_keys_are_rejected_and_offered(src):
+    """TERMINAL_KEYS 供终态角标/市场改判按钮使用，词汇表里终态就这两个。"""
     assert _terminal_keys(src) == {"rejected", "offered"}
 
 
