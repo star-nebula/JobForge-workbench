@@ -106,6 +106,7 @@ class CrawlReq(BaseModel):
 
 class ScrapeFromResumeReq(BaseModel):
     resume_text: str = Field(..., min_length=1, description="简历纯文本")
+    query: Optional[str] = Field(None, description="覆盖自动推导的搜索关键词（A4：抓取词放开自由输入）；留空=从简历推导")
     platform: str = Field("all")
     city: Optional[str] = Field(None, description="覆盖简历中的城市")
     page: int = Field(1, ge=1)
@@ -1035,7 +1036,9 @@ def scrape_from_resume(req: ScrapeFromResumeReq):
     抓完后 upsert 到 seen_jobs（SQLite 去重缓存），返回的每个岗位带 is_new + score_detail 字段。
     """
     keywords = spider.extract_resume_keywords(req.resume_text)
-    query = keywords["target_position"] or " ".join(keywords["skills"][:3]) or "前端工程师"
+    # 搜索词：显式指定（自由关键词入口）优先，留空才从简历推导；匹配度评分始终用简历关键词
+    query = (req.query or "").strip() \
+        or keywords["target_position"] or " ".join(keywords["skills"][:3]) or "前端工程师"
     city = req.city or _profile_city() or keywords["city"] or "全国"
 
     with _progress_scope("智能抓取", "打开搜索页并读取岗位列表", total=1) as sc:

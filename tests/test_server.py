@@ -8,8 +8,8 @@ import pytest
 from fastapi import HTTPException
 
 from jobforge import llm, server
-from jobforge.server import (AnalyzeBatchReq, CrawlReq, JdConfirmReq, TriageReq,
-                             _get_llm_config, _mask_key)
+from jobforge.server import (AnalyzeBatchReq, CrawlReq, JdConfirmReq, ScrapeFromResumeReq,
+                             TriageReq, _get_llm_config, _mask_key)
 
 
 def test_mask_key():
@@ -550,3 +550,39 @@ def test_pausable_still_honours_stop(monkeypatch):
     assert data is None and note == "已停止"
 
 
+
+
+# ---------- A4：抓取词放开自由关键词（2026-10-03，后端 query 覆盖字段） ----------
+
+def _stub_scrape(monkeypatch, city="上海"):
+    """一条龙端点全 stub：crawl 不真抓、db 不碰真实库、进度作用域不拉悬浮窗。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": city}})
+    monkeypatch.setattr(server, "_progress_scope", lambda *a, **k: _NullScope())
+    monkeypatch.setattr(server.db, "upsert_jobs", lambda jobs: [False] * len(jobs))
+    monkeypatch.setattr(server.db, "add_scrape_log", lambda *a, **k: None)
+    seen = {}
+    monkeypatch.setattr(server.spider, "crawl",
+                        lambda plat, q, c, page, mock: seen.update(query=q, city=c) or
+                        {"jobs": [], "source": "real", "platform": "boss"})
+    return seen
+
+
+_RESUME = "李明远\n求职意向：高级前端工程师\n期望城市：上海\n技能专长：JavaScript React"
+
+
+def test_scrape_query_override(monkeypatch):
+    """显式自由关键词优先于简历推导（A4：UI 已有入口，同词反复抓的困局在这解开）。"""
+    seen = _stub_scrape(monkeypatch)
+    r = server.scrape_from_resume(
+        ScrapeFromResumeReq(resume_text=_RESUME, query="Go 后端"))
+    assert r["query_used"] == "Go 后端"
+    assert seen["query"] == "Go 后端"
+
+
+def test_scrape_query_blank_falls_back_to_resume(monkeypatch):
+    """留空/纯空白 = 原行为：从简历解析意向岗位推导。"""
+    seen = _stub_scrape(monkeypatch)
+    r = server.scrape_from_resume(
+        ScrapeFromResumeReq(resume_text=_RESUME, query="   "))
+    assert r["query_used"] == "高级前端工程师"
+    assert seen["query"] == "高级前端工程师"

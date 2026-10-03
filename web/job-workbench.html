@@ -471,6 +471,9 @@
   .toast.show{transform:none}
   .toast-ico{width:34px;height:34px;border-radius:50%;background:rgba(34,197,94,.15);color:var(--green);display:flex;align-items:center;justify-content:center;flex-shrink:0}
   .toast-ico svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2.5}
+  /* 失败类 toast：红样式（showToast 按标题自动判定，见下方 showToast） */
+  .toast.err .toast-ico{background:rgba(239,68,68,.15);color:var(--red)}
+  .toast.err{border-color:rgba(239,68,68,.4)}
   .toast-text b{font-size:13px;display:block}
   .toast-text span{font-size:11.5px;color:var(--text-3)}
 
@@ -566,7 +569,6 @@
     <div class="nav-item" data-view="profile">
       <svg viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
       个人资料
-      <span class="nav-badge">NEW</span>
     </div>
     <div class="nav-item" data-view="jobs">
       <svg viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/></svg>
@@ -895,6 +897,9 @@
       </div>
     </div>
     <div style="padding:12px 20px 0">
+      <input id="scrapeQuery" placeholder="搜索关键词（留空 = 自动按简历解析意向岗位/技能；可输入任意词开新供给，如「Go 后端」「Grafana」）" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:9px 10px;border-radius:8px;font-size:13px;font-family:inherit">
+    </div>
+    <div style="padding:10px 20px 0">
       <button class="btn primary" id="scrapeBtn" style="width:100%;justify-content:center;padding:11px;font-size:14px">
         <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
         开始智能抓取
@@ -1054,7 +1059,11 @@ const _isTerminal=j=>TERMINAL_KEYS.includes(j&&j.status);
 // 流转口径（2026-10-03）：discovered 是岗位市场的归属状态，不进流水线；
 // 粗筛通过（keep=1）由后端自动升入评估列。五个流水线状态一状态一列，
 // 终态不合并——不合适与已 Offer 语义相反，合列既藏漏斗信息又会让拖放写错状态。
-const KANBAN_COLS=STATUS_META.slice(1).map(s=>({key:s.key,name:s.name,color:s.color,statuses:[s.key],drop:s.key}));
+// 列序显式声明（同日用户裁定）：不合适放最后一列收尾；词汇表 STATUS_META 原序不动
+// （详情弹窗状态条与仪表盘管道仍按词汇表渲染），列键与词汇表的一致性由契约测试钉住。
+const KANBAN_COL_ORDER=['reviewing','applied','interviewing','offered','rejected'];
+const KANBAN_COLS=KANBAN_COL_ORDER.map(k=>{const s=STATUS_BY_KEY[k];
+  return {key:s.key,name:s.name,color:s.color,statuses:[s.key],drop:s.key};});
 
 // 状态/备注写库：PATCH 之后同步本地缓存，再让当前视图各自重渲染（不重新拉全量、不触发抓 JD）
 async function _patchJob(platform,jobId,patch,toast){
@@ -1141,7 +1150,7 @@ function _renderJdStats(){
     <span class="jd-pill has ${_jdFilter==='has'?'active':''}" data-jd-filter="has" title="点击只看已获取 JD 的岗位">
       ✓ 已获取 <b>${s.with_jd}</b>
     </span>
-    <span class="jd-pill missing ${_jdFilter==='missing'?'active':''}" data-jd-filter="missing" title="点击只看未获取 JD 的岗位；在岗位市场点开岗位卡片会自动抓取">
+    <span class="jd-pill missing ${_jdFilter==='missing'?'active':''}" data-jd-filter="missing" title="点击只看未获取 JD 的岗位；点开岗位卡片后按「抓取 JD 全文」获取">
       ✗ 未获取 <b>${s.without_jd}</b>
     </span>
     <span style="color:var(--text-3)" title="已获取 JD 的岗位占比">覆盖率 ${pct}%</span>
@@ -1205,7 +1214,7 @@ function _renderJobList(jobs,q){
   }
   list.innerHTML=shown.map(j=>`
     <div class="kcard${j.triage_keep===0?' tri-dim':''}" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片会自动抓取">无 JD</span>'}${_triBadge(j)}${_termBadge(j)}</div>
+      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片后按「抓取 JD 全文」获取">无 JD</span>'}${_triBadge(j)}${_statusPill(j)}</div>
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span>${_hl(j.salary,q)||'面议'}</span>
@@ -1288,6 +1297,15 @@ function _termBadge(j){
   if(j.status==='offered')return '<span class="kcard-term offered" title="终态：已拿到 Offer">✓ 已 Offer</span>';
   if(j.status==='rejected')return '<span class="kcard-term rejected" title="终态：已判不合适">✗ 不合适</span>';
   return '';
+}
+// 岗位市场卡片状态角标：终态沿用 _termBadge；评估中/已投递/面试中也要可见——
+// 此前非终态在市场里与未处理岗毫无区分，已投的岗还能一键点「不合适」
+function _statusPill(j){
+  const st=j.status||'discovered';
+  if(_isTerminal(j))return _termBadge(j);
+  const m=STATUS_BY_KEY[st];
+  if(!m||st==='discovered')return '';
+  return `<span class="kcard-term" style="background:${m.color}22;color:${m.color}" title="投递状态：${m.name}（详情弹窗状态条或看板拖拽可改）">● ${m.name}</span>`;
 }
 
 function attachDragHandlers(){
@@ -1423,10 +1441,10 @@ function renderDashRecent(list){
     return;
   }
   el.innerHTML=list.map(j=>`
-    <div class="act-item">
+    <div class="act-item" data-platform="${j.platform}" data-job-id="${j.job_id}" style="cursor:pointer" title="点击查看岗位详情">
       <div class="act-ico" style="color:var(--accent)"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M8 20h8"/></svg></div>
       <div class="act-main">
-        <div class="act-text">发现 <b><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">${j.title||''}</a></b> · ${j.company||''}</div>
+        <div class="act-text">发现 <b><span style="color:inherit">${j.title||''}</span></b> · ${j.company||''}</div>
         <div class="act-time">${PLATFORM_NAME[j.platform]||j.platform||''} · ${j.city||''} · ${j.salary||'面议'} · 匹配 ${j.match_score||0} · ${dashTime(j.first_seen_at)}</div>
       </div>
     </div>
@@ -1444,12 +1462,12 @@ function renderDashTop(list){
     const sc=j.match_score||0;
     const c=sc>=90?'var(--green)':sc>=75?'var(--accent-2)':'var(--text-2)';
     return `
-      <div class="pipe-row">
+      <div class="pipe-row" data-platform="${j.platform}" data-job-id="${j.job_id}" style="cursor:pointer" title="点击查看岗位详情">
         <div class="pipe-stage">
           <span class="pipe-count" style="color:var(--text-3);font-size:12px">${i+1}</span>
           <span class="co-logo" style="width:28px;height:28px;font-size:12px;background:${PLATFORM_COLOR[j.platform]||'#888'}">${(j.company||'?')[0]}</span>
           <div>
-            <div class="pipe-name" style="font-size:12.5px"><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" style="color:inherit;text-decoration:none">${j.title||''}</a></div>
+            <div class="pipe-name" style="font-size:12.5px"><span style="color:inherit">${j.title||''}</span></div>
             <div class="act-time">${j.company||''} · ${j.city||''} · ${j.salary||'面议'}</div>
           </div>
         </div>
@@ -1461,10 +1479,16 @@ function renderDashTop(list){
 
 // Toast
 let toastTimer;
-function showToast(title,msg){
+function showToast(title,msg,isErr){
   const t=document.getElementById('toast');
   document.getElementById('toastTitle').textContent=title;
   document.getElementById('toastMsg').textContent=msg||'';
+  // 失败类 toast 用红样式：显式传参优先，否则按标题判定（保存失败/解析失败/无法…）
+  const err=isErr!=null?isErr:/失败|错误|无法|未成功/.test(title);
+  t.classList.toggle('err',err);
+  t.querySelector('.toast-ico').innerHTML=err
+    ?'<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>'
+    :'<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
   t.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>t.classList.remove('show'),3000);
@@ -2257,7 +2281,7 @@ async function refreshScrapeHistory(){
         ?'<span style="color:var(--red)">失败</span>'
         :`<span style="color:var(--green)">共 ${l.total} · 新 ${l.new_count}</span>`;
       const esc=s=>String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-      return `<div class="sh-item" data-city="${esc(l.city||'')}" data-page="${l.page||1}">
+      return `<div class="sh-item" data-city="${esc(l.city||'')}" data-page="${l.page||1}" data-query="${esc(l.query_used||'')}">
         <div class="sh-time">${_fmtTime(l.created_at)}</div>
         <div class="sh-cond" title="${esc(cond)}">${failed?'<span style="color:var(--red)">'+esc((l.error||'抓取失败').slice(0,60))+'</span>':esc(cond)}</div>
         <div class="sh-stat">${stat}</div>
@@ -2272,15 +2296,16 @@ document.getElementById('scrapeHistory').addEventListener('click',e=>{
   const btn=e.target.closest('[data-refill]');
   if(!btn)return;
   const item=btn.closest('.sh-item');
-  const city=item.dataset.city, page=item.dataset.page;
+  const city=item.dataset.city, page=item.dataset.page, query=item.dataset.query||'';
   if(city){
     const sel=document.getElementById('scrapeCity');
     const opt=[...sel.options].find(o=>o.value===city||o.textContent===city);
     if(opt)sel.value=opt.value;
   }
   if(page)document.getElementById('scrapePage').value=page;
+  document.getElementById('scrapeQuery').value=query;
   switchScrapeTab('results');
-  showToast('已回填条件','城市与页码已按该条历史设置');
+  showToast('已回填条件','关键词、城市与页码已按该条历史设置');
 });
 
 document.getElementById('loadDemoBtn').addEventListener('click',()=>{
@@ -2342,7 +2367,7 @@ document.getElementById('scrapeBtn').addEventListener('click',async()=>{
     const resp=await fetch('/api/scrape-from-resume',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({resume_text:resume,platform:'boss',city,page,use_mock:false})
+      body:JSON.stringify({resume_text:resume,query:(document.getElementById('scrapeQuery').value||'').trim()||null,platform:'boss',city,page,use_mock:false})
     });
     const data=await resp.json();
     lastScrapeData=data;
@@ -2709,7 +2734,7 @@ async function _ivwModalSubmit(clear){
   document.getElementById('ivwModalCancel').addEventListener('click',closeIvwModal);
   document.getElementById('ivwModalSave').addEventListener('click',()=>_ivwModalSubmit(false));
   document.getElementById('ivwModalClear').addEventListener('click',()=>_ivwModalSubmit(true));
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&modal.style.display==='flex')closeIvwModal()});
+  // Esc 统一走底部「Esc 关闭最上层弹窗」集中监听（此前各弹窗各自监听，叠开时会一次全关）
 })();
 const iab=document.getElementById('ivwAddBtn');if(iab)iab.addEventListener('click',openIvwModalPicker);
 
@@ -2953,6 +2978,19 @@ async function _confirmJobJd(j){
 async function loadJobJd(j, refresh){
   const box=document.getElementById('jdText');
   if(!box)return;
+  const p=_jdModalCtx||{};
+  // 确认制（2026-10-03）：还没缓存的 JD 不再点开即自动抓——抓取要接管键鼠约 30 秒，
+  // 用户只是想看看卡片时被抢键鼠是惊吓；给出明确按钮把接管变成知情选择
+  if(!refresh&&!_hasJd(j)){
+    box.innerHTML=`<div style="text-align:center;padding:18px 12px">
+      <div style="font-size:12.5px;color:var(--text-3);line-height:1.7;margin-bottom:12px">该岗位还没有缓存 JD 全文。<br>抓取需要接管键鼠操作桌面 Chrome 约 30 秒（期间请勿动键鼠）；上方的技能对照与标签初筛不依赖 JD，可先看。</div>
+      <button class="btn primary" id="jdFetchBtn" style="padding:7px 16px">抓取 JD 全文</button>
+      <a href="${j.url||'#'}" target="_blank" rel="noopener noreferrer" style="margin-left:12px;color:var(--accent);font-size:12px;text-decoration:none">直接去 BOSS 看 ↗</a>
+    </div>`;
+    const fb=document.getElementById('jdFetchBtn');
+    if(fb)fb.addEventListener('click',()=>loadJobJd(j,true));
+    return;
+  }
   if(refresh)box.innerHTML='<span style="color:var(--text-3)">正在重新抓取…</span>';
   try{
     const p=_jdModalCtx||{};
@@ -2982,7 +3020,7 @@ async function loadJobJd(j, refresh){
   if(!modal)return;
   modal.addEventListener('click',e=>{if(e.target===modal)modal.style.display='none'});
   document.getElementById('jdModalClose').addEventListener('click',()=>modal.style.display='none');
-  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&modal.style.display==='flex')modal.style.display='none'});
+  // Esc 统一走底部「Esc 关闭最上层弹窗」集中监听
   // 全局点击委托：任何带 data-job-id 的岗位卡片点击弹详情
   // （链接/按钮/输入控件内的点击不触发；看板拖拽不产生 click）
   document.addEventListener('click',e=>{
@@ -3025,6 +3063,19 @@ async function loadJobJd(j, refresh){
       const ni=document.getElementById('jdNotesInput');
       if(!ni)return;
       _patchFromModal({status:(_jdModalJob&&_jdModalJob.status)||'discovered',notes:ni.value},['已保存','备注已写入库']);
+    }
+  });
+})();
+
+// ===== Esc 关闭最上层弹窗（按 z-index 从高到低：220 润色/模型 → 210 详情 → 205 抓取/版本 → 200 面试）=====
+// 此前只有详情/面试弹窗支持 Esc，模型/润色/抓取/版本弹窗按 Esc 没反应；且各弹窗自听会在叠开时一次全关
+(function(){
+  const ORDER=['polishModal','llmModal','jobDetailModal','versionsModal','scrapeModal','ivwModal'];
+  document.addEventListener('keydown',e=>{
+    if(e.key!=='Escape')return;
+    for(const id of ORDER){
+      const m=document.getElementById(id);
+      if(m&&m.style.display==='flex'){m.style.display='none';e.preventDefault();return;}
     }
   });
 })();

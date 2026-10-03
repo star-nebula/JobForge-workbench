@@ -44,17 +44,22 @@ def test_status_vocabulary_matches_db(src):
 def test_kanban_columns_cover_pipeline(src):
     """看板列 = 除 discovered 外每个状态一列：已发现归岗位市场，终态不再合并。
 
-    派生自词汇表（slice(1)）而不是另写一份——另写必然漂移，A1 就是这么来的。
+    列键集合与词汇表派生比对（另写一份必然漂移，A1 就是这么来的）；
+    列序为前端显式声明（2026-10-03 用户裁定：不合适放最后一列收尾），
+    列序漂了或词汇表增删状态没跟上，这里都会红。
     """
-    block = src[src.index("const KANBAN_COLS="):]
-    block = block[:block.index(";")]
-    assert "STATUS_META.slice(1)" in block
-    assert "TERMINAL_KEYS" not in block            # 终态各自一列，没有「已结束」合并列
-    assert "discovered" not in block               # 已发现不渲染成看板列
+    order_block = src[src.index("const KANBAN_COL_ORDER="):]
+    order_block = order_block[:order_block.index(";")]
+    assert "discovered" not in order_block          # 已发现不渲染成看板列
+    order = re.findall(r"'([a-z_]+)'", order_block)
     assert src.count("const KANBAN_COLS=") == 1
+    cols_stmt = src[src.index("const KANBAN_COLS="):]
+    cols_stmt = cols_stmt[:cols_stmt.index(";")]
+    assert "TERMINAL_KEYS" not in cols_stmt         # 终态各自一列，没有「已结束」合并列
     keys = _status_meta_keys(src)
-    assert keys[0] == "discovered"                 # slice(1) 跳过的必须正是它
-    assert set(keys[1:]) == set(keys) - {"discovered"}
+    assert keys[0] == "discovered"                  # 词汇表里被看板跳过的必须正是它
+    assert set(order) == set(keys) - {"discovered"}  # 一状态一列，不重不漏
+    assert order == ["reviewing", "applied", "interviewing", "offered", "rejected"]
 
 
 def test_terminal_keys_are_rejected_and_offered(src):
