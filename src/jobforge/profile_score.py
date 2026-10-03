@@ -40,8 +40,13 @@ def compute_profile_score(data: Dict) -> Dict[str, Any]:
 
     # ---- 完整度（62 分）----
     add("name", "姓名", 6, bool(_s(data.get("name"))), "姓名已填写", "补上姓名，导出简历必需")
-    add("phone", "电话", 6, bool(_PHONE_RE.match(_s(data.get("phone")))),
-        "电话格式正确", "电话缺失或不是 11 位手机号（HR 联系不上你）")
+    # 手机号判定 = 11 位 + 13-19 号段（12x 是服务号不是手机号）；文案分两支，
+    # 否则「填了 11 位却报不是 11 位」这种自相矛盾的提示会让人无从排查
+    _phone = _s(data.get("phone"))
+    _phone_11 = _phone.isdigit() and len(_phone) == 11
+    add("phone", "电话", 6, bool(_PHONE_RE.match(_phone)), "电话格式正确",
+        "11 位但号段不对：手机号应为 13-19 开头（12x 是服务号）" if _phone_11
+        else "电话缺失或不是 11 位手机号（HR 联系不上你）")
     add("email", "邮箱", 6, bool(_EMAIL_RE.match(_s(data.get("email")))),
         "邮箱格式正确", "邮箱缺失或格式不对")
     add("target_position", "意向岗位", 8, bool(_s(data.get("target_position"))),

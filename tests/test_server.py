@@ -653,3 +653,50 @@ def test_triage_status_reports_progress(monkeypatch):
     s = server.triage_status()
     assert s["running"] is False
     assert s["done"] == 2 and s["total"] == -(-2 // llm.TRIAGE_CHUNK)
+
+
+# ---------- C/D 组：数据备份 + 消息截断诚实化（2026-10-03） ----------
+
+def test_backup_roundtrip(tmp_path, monkeypatch):
+    """备份 = jobs.db 热备 + messages.json 复制；清单能列出且带文件名。"""
+    import sqlite3
+    src = tmp_path / "src"; src.mkdir()
+    c = sqlite3.connect(str(src / "jobs.db"))
+    c.execute("CREATE TABLE t(x)"); c.commit(); c.close()
+    (src / "messages.json").write_text('[]', encoding='utf-8')
+    monkeypatch.setattr(server.paths, "data", lambda *p: str(src.joinpath(*p)))
+    r = server.create_backup()
+    assert r["ok"] is True
+    ls = server.list_backups()
+    assert ls["keep"] == server._BACKUP_KEEP
+    assert ls["backups"] and ls["backups"][0]["name"] == r["name"]
+    assert "jobs.db" in ls["backups"][0]["files"]
+    assert "messages.json" in ls["backups"][0]["files"]
+
+
+def test_backup_prunes_to_keep_limit(tmp_path, monkeypatch):
+    """备份目录只保留最近 _BACKUP_KEEP 份（含新做的这份）。"""
+    import pathlib
+    import sqlite3
+    src = tmp_path / "src"; src.mkdir()
+    c = sqlite3.connect(str(src / "jobs.db"))
+    c.execute("CREATE TABLE t(x)"); c.commit(); c.close()
+    monkeypatch.setattr(server.paths, "data", lambda *p: str(src.joinpath(*p)))
+    monkeypatch.setattr(server, "_BACKUP_KEEP", 2)
+    bdir = pathlib.Path(src) / "backups"
+    for n in ("backup-20260101-000001", "backup-20260102-000002", "backup-20260103-000003"):
+        (bdir / n).mkdir(parents=True)
+    assert server.create_backup()["ok"] is True
+    names = sorted(d.name for d in bdir.iterdir() if d.is_dir())
+    assert len(names) == 2 and "backup-20260101-000001" not in names
+
+
+def test_messages_endpoint_reports_truncation(tmp_path, monkeypatch):
+    """limit 静默截断改为如实返回 total/truncated（C 组体检条：后 100 条悄悄消失）。"""
+    monkeypatch.setattr(server.db, "list_messages",
+                        lambda limit=200: [{"msg_id": i} for i in range(min(limit, 3))])
+    monkeypatch.setattr(server.db, "count_messages", lambda: 50)
+    r = server.get_messages()
+    assert r["total"] == 50 and len(r["messages"]) == 3 and r["truncated"] is True
+    monkeypatch.setattr(server.db, "count_messages", lambda: 3)
+    assert server.get_messages()["truncated"] is False

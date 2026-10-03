@@ -1148,6 +1148,64 @@ def get_jd_stats():
     return db.get_jd_stats()
 
 
+# ---------- 数据备份（C 组）：求职库是不可再生资产，一键落 data/backups/ ----------
+_BACKUP_KEEP = 10   # 自动保留的最近份数
+
+
+def _backup_dir():
+    import pathlib
+    return pathlib.Path(paths.data("backups"))
+
+
+@app.get("/api/backup/list")
+def list_backups():
+    """已有备份清单（新→旧），供设置弹窗展示。"""
+    bdir = _backup_dir()
+    out = []
+    if bdir.exists():
+        for d in sorted(bdir.iterdir(), reverse=True):
+            if d.is_dir() and d.name.startswith("backup-"):
+                size = sum(f.stat().st_size for f in d.iterdir() if f.is_file())
+                out.append({"name": d.name,
+                            "files": sorted(f.name for f in d.iterdir() if f.is_file()),
+                            "size_bytes": size})
+    return {"backups": out, "keep": _BACKUP_KEEP}
+
+
+@app.post("/api/backup")
+def create_backup():
+    """一键备份：SQLite backup API 热备 jobs.db（WAL 模式下一致性安全）+ 复制 messages.json。
+
+    不备份 cookies.json（登录态凭据，且可随时重抓）；只保留最近 _BACKUP_KEEP 份。"""
+    import shutil
+    import sqlite3
+    bdir = _backup_dir()
+    bdir.mkdir(parents=True, exist_ok=True)
+    name = time.strftime("backup-%Y%m%d-%H%M%S")
+    dest = bdir / name
+    if dest.exists():   # 同一秒连按：幂等返回
+        return {"ok": True, "name": name, "note": "该时刻备份已存在"}
+    dest.mkdir()
+    try:
+        src = sqlite3.connect(paths.data("jobs.db"))
+        dst = sqlite3.connect(str(dest / "jobs.db"))
+        with dst:
+            src.backup(dst)
+        dst.close()
+        src.close()
+        msg = _backup_dir().parent / "messages.json"
+        if msg.exists():
+            shutil.copy2(msg, dest / "messages.json")
+    except Exception as e:
+        shutil.rmtree(dest, ignore_errors=True)   # 失败不留半份坏备份
+        return {"ok": False, "error": f"备份失败：{e}"}
+    dirs = sorted([d for d in bdir.iterdir()
+                   if d.is_dir() and d.name.startswith("backup-")], reverse=True)
+    for old in dirs[_BACKUP_KEEP:]:
+        shutil.rmtree(old, ignore_errors=True)
+    return {"ok": True, "name": name}
+
+
 @app.get("/api/stats")
 def get_stats():
     """看板聚合统计（总数/状态分布/匹配度分布/14 天趋势/Top5/最近动态）。
@@ -1163,8 +1221,13 @@ def get_stats():
 
 @app.get("/api/messages")
 def get_messages():
-    """已缓存的会话消息（消息中心，按消息时间倒序）。"""
-    return {"messages": db.list_messages()}
+    """已缓存的会话消息（消息中心，按消息时间倒序）。
+
+    limit 提到 500 并如实返回 total/truncated——此前 limit=200 静默截断，
+    会话超过 200 条时后 100 条悄悄消失，用户无从知晓（C 组体检条）。"""
+    msgs = db.list_messages(limit=500)
+    total = db.count_messages()
+    return {"messages": msgs, "total": total, "truncated": total > len(msgs)}
 
 
 @app.post("/api/messages/refresh")
@@ -1216,11 +1279,15 @@ def refresh_messages():
             return {"ok": False, "error": err, "debug_urls": data.get("debug_urls") or []}
         msgs = data.get("messages") or []
         stats = db.upsert_messages(msgs)
+        _all = db.list_messages(limit=500)
+        _total = db.count_messages()
         return {
             "ok": True,
             "fetched": len(msgs),
             "new": stats["new"],
-            "messages": db.list_messages(),
+            "messages": _all,
+            "total": _total,
+            "truncated": _total > len(_all),
             "fetched_at": data.get("fetched_at"),
             "note": launched_note or None,
         }

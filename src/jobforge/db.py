@@ -476,6 +476,12 @@ def list_messages(limit: int = 200) -> List[Dict]:
         return [dict(r) for r in rows]
 
 
+def count_messages() -> int:
+    """会话总数——供 /api/messages 如实告知截断（此前 limit=200 静默截断）。"""
+    with _conn() as c:
+        return c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+
+
 def get_profile() -> Optional[Dict]:
     """读个人资料（单行表）。返回 {data, updated_at}，无记录返回 None。"""
     with _conn() as c:

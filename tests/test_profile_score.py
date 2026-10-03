@@ -61,3 +61,19 @@ def test_quantified_needs_three_hits():
     mid = {**GOOD, "experience": "性能提升 20%，交付效率提升 30%。"}
     by_k = {c["k"]: c for c in compute_profile_score(mid)["checks"]}
     assert by_k["quantified"]["ok"]
+
+
+def test_phone_message_distinguishes_prefix_from_length():
+    """文案分两支：11 位但 12x 号段不能再报「不是 11 位」——报错要能指向真因。"""
+    data = {"name": "张三", "phone": "12345678900"}
+    checks = {c["k"]: c for c in compute_profile_score(data)["checks"]}
+    assert checks["phone"]["ok"] is False
+    assert "号段不对" in checks["phone"]["msg"] and "不是 11 位" not in checks["phone"]["msg"]
+
+    data2 = {"name": "张三", "phone": "1381234567"}   # 10 位
+    checks2 = {c["k"]: c for c in compute_profile_score(data2)["checks"]}
+    assert "不是 11 位" in checks2["phone"]["msg"]
+
+    data3 = {"name": "张三", "phone": "13812345678"}
+    checks3 = {c["k"]: c for c in compute_profile_score(data3)["checks"]}
+    assert checks3["phone"]["ok"] is True

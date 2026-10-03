@@ -299,13 +299,6 @@
     display:flex;align-items:center;gap:6px;padding:10px 14px;
     border-bottom:1px solid var(--border);background:var(--bg-3);
   }
-  .tb-btn{
-    width:30px;height:30px;border-radius:6px;border:none;background:transparent;
-    color:var(--text-2);cursor:pointer;display:flex;align-items:center;justify-content:center;
-    transition:all .12s;font-size:13px;font-weight:600;
-  }
-  .tb-btn:hover{background:var(--border);color:var(--text)}
-  .tb-sep{width:1px;height:18px;background:var(--border);margin:0 4px}
   .resume-canvas{
     background:#fff;color:#1a1a1a;padding:40px 44px;min-height:600px;
     max-width:100%;
@@ -608,8 +601,9 @@
       </div>
       <div class="top-actions">
         <button class="btn" id="hudBtn" title="打开置顶悬浮进度窗：抓取时显示进度与暂停/结束按钮（悬浮窗不抢焦点、鼠标点击会穿透，可放心操作）">🪟 进度悬浮窗</button>
-        <button class="icon-btn" title="通知">
+        <button class="icon-btn" id="notifBtn" title="面试提醒：安排了面试后，未来 7 天内会显示角标" style="position:relative">
           <svg viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+          <span id="notifBadge" style="display:none;position:absolute;top:-5px;right:-5px;min-width:16px;height:16px;border-radius:8px;background:var(--red);color:#fff;font-size:10px;font-weight:700;align-items:center;justify-content:center;padding:0 4px">0</span>
         </button>
         <button class="icon-btn" id="settingsBtn" title="AI 模型设置">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -716,20 +710,8 @@
             <!-- ② 简历预览（渲染当前个人资料；导出 PDF 即打印此画布） -->
             <div class="resume-editor" id="resumePreviewWrap">
               <div class="resume-toolbar">
-                <button class="tb-btn"><b>B</b></button>
-                <button class="tb-btn" style="font-style:italic">I</button>
-                <button class="tb-btn"><u>U</u></button>
-                <div class="tb-sep"></div>
-                <button class="tb-btn">≡</button>
-                <button class="tb-btn">☰</button>
-                <div class="tb-sep"></div>
-                <button class="tb-btn">H₁</button>
-                <button class="tb-btn">•</button>
-                <button class="tb-btn">↳</button>
-                <div class="tb-sep"></div>
-                <button class="tb-btn" id="polishTriggerBtn" title="AI 润色（简介+经历，diff 比对后采纳）">✨</button>
-                <button class="tb-btn" title="岗位适配">🎯</button>
-                <div style="margin-left:auto;font-size:12px;color:var(--text-3)">只读预览 · 随个人资料更新</div>
+                <button class="btn" id="polishTriggerBtn" style="padding:6px 12px;font-size:11.5px" title="AI 润色（简介+经历，diff 比对后采纳）">✨ AI 润色</button>
+                <div style="margin-left:auto;font-size:12px;color:var(--text-3)">只读预览 · 随个人资料更新 · 编辑请用上方「个人信息」卡</div>
               </div>
               <div class="resume-canvas" id="resumePreviewCanvas"></div>
             </div>
@@ -759,7 +741,7 @@
               </div>
             </div>
 
-            <!-- ④ AI 评分 + 优化建议（原型，后期接 LLM） -->
+            <!-- ④ 简历体检 + 优化建议（纯本地规则引擎 profile_score：完整度 62 + 质量 38，无 LLM） -->
             <div style="display:flex;gap:12px;align-items:stretch">
               <div class="ai-score" style="flex-shrink:0;width:150px;display:flex;flex-direction:column;justify-content:center">
                 <div class="score-ring">
@@ -769,7 +751,7 @@
                   </svg>
                   <div class="score-num" id="scoreNum">–</div>
                 </div>
-                <div class="score-label">简历评分 <b id="scoreLevel">待填写</b></div>
+                <div class="score-label">简历体检 <b id="scoreLevel">待填写</b></div>
               </div>
               <div class="panel" style="flex:1;min-width:0">
                 <div class="panel-title" style="margin-bottom:12px">优化建议</div>
@@ -860,6 +842,18 @@
   <div class="toast-text"><b id="toastTitle">操作成功</b><span id="toastMsg">已完成</span></div>
 </div>
 
+<!-- 通用输入模态（替代原生 prompt：无进度无撤销且样式突兀，D 组打磨） -->
+<div id="promptModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:230;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(400px,92vw);padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <div id="promptTitle" style="font-size:15px;font-weight:700;margin-bottom:12px">输入</div>
+    <input id="promptInput" style="width:100%;background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:9px 10px;border-radius:8px;font-size:13px;font-family:inherit">
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn" id="promptCancel">取消</button>
+      <button class="btn primary" id="promptOk">确定</button>
+    </div>
+  </div>
+</div>
+
 <!-- 面试安排弹窗（看板/面试日程共用） -->
 <div id="ivwModal" style="display:none;position:fixed;inset:0;background:rgba(5,7,12,.6);z-index:200;align-items:center;justify-content:center;backdrop-filter:blur(2px)">
   <div style="background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(440px,92vw);padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
@@ -903,8 +897,10 @@
           <option value="">自动（从个人资料解析）</option>
           <option>北京</option><option>上海</option><option>广州</option>
           <option>深圳</option><option>杭州</option><option>成都</option>
-          <option>南京</option><option>武汉</option><option>全国</option>
+          <option>南京</option><option>武汉</option><option>西安</option>
+          <option>苏州</option><option>全国</option>
         </select>
+        <div style="font-size:10.5px;color:var(--text-3);margin-top:4px" title="仅列出 BOSS 接口支持的城市编码（spider.BOSS_CITY_CODES）；其它城市名会在抓取时报错提示">可选城市以 BOSS 支持为准</div>
       </div>
       <div>
         <div style="font-size:12px;color:var(--text-3);margin-bottom:6px">页码</div>
@@ -990,6 +986,13 @@
         </div>
         <div id="lf_testResult" style="font-size:12px;margin-top:8px;color:var(--text-3)"></div>
       </div>
+    </div>
+    <div style="padding:10px 18px 0;border-top:1px solid var(--border);margin-top:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div style="font-size:12px;color:var(--text-3);flex:1;line-height:1.5"><b style="color:var(--text-2)">数据备份</b> · 岗位/消息/资料/简历版本全在本地 jobs.db，建议每周备份一次；不备份 cookies（登录态凭据）</div>
+        <button class="btn" id="backupNowBtn" style="padding:6px 12px;font-size:11.5px;flex-shrink:0">💾 立即备份</button>
+      </div>
+      <div id="backupList" style="font-size:11.5px;color:var(--text-3);margin:6px 0 4px;line-height:1.6"></div>
     </div>
     <div style="padding:10px 18px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px">
       <button class="btn primary" id="llmAddBtn" style="padding:7px 14px">＋ 新增模型</button>
@@ -1113,6 +1116,20 @@ let _jdFilter='';       // '' | 'has' | 'missing' | 'thin'：按 JD 获取情况
 let _triFilter='';      // '' | 'keep' | 'drop' | 'none'：按粗筛结论筛选（阶段2 A2）
 let _statusFilter='';   // '' = 全部，否则 STATUS_META 的 key（阶段2 A2）
 let _sortKey='smart';   // 'smart' = 综合分（AI 精配分优先、缺则初筛分）| 'score' | 'new'（10-03 用户裁定默认综合分）
+// 筛选/排序持久化（D 组）：进页面恢复上次的筛选状态，词表校验防止 localStorage 里存了过时值
+(function(){
+  const get=(k,ok)=>{const v=localStorage.getItem(k);return v!=null&&ok(v)?v:null;};
+  if(get('jf_jd',v=>['has','missing','thin'].includes(v)))_jdFilter=localStorage.getItem('jf_jd');
+  if(get('jf_tri',v=>['keep','drop','none'].includes(v)))_triFilter=localStorage.getItem('jf_tri');
+  if(get('jf_status',v=>!!STATUS_BY_KEY[v]))_statusFilter=localStorage.getItem('jf_status');
+  if(get('jf_sort',v=>['smart','score','new'].includes(v)))_sortKey=localStorage.getItem('jf_sort');
+})();
+function _saveMktFilters(){
+  localStorage.setItem('jf_sort',_sortKey);
+  localStorage.setItem('jf_status',_statusFilter);
+  localStorage.setItem('jf_jd',_jdFilter);
+  localStorage.setItem('jf_tri',_triFilter);
+}
 const JD_THIN_LEN=100;  // 与后端 db.JD_THIN_LEN 同口径
 function _hasJd(j){return !!(j&&j.jd_text&&String(j.jd_text).trim())}
 function _isThinJd(j){return _hasJd(j)&&String(j.jd_text).trim().length<JD_THIN_LEN&&!j.jd_confirmed}
@@ -1124,6 +1141,7 @@ function _smartScore(j){
 function _clearAllFilters(){
   _jdFilter='';_triFilter='';_statusFilter='';
   const ss=document.getElementById('statusSel');if(ss)ss.value='';
+  _saveMktFilters();
   _renderJdStats();_renderJobList(jobCache,_searchQ());
 }
 function _matchJdFilter(j){
@@ -1194,6 +1212,7 @@ function _renderJdStats(){
     el.addEventListener('click',()=>{
       const f=el.dataset.jdFilter;
       _jdFilter=(_jdFilter===f)?'':f;
+      _saveMktFilters();
       _renderJdStats();
       _renderJobList(jobCache,_searchQ());
     });
@@ -1202,6 +1221,7 @@ function _renderJdStats(){
     el.addEventListener('click',()=>{
       const f=el.dataset.triFilter;
       _triFilter=(_triFilter===f)?'':f;
+      _saveMktFilters();
       _renderJdStats();
       _renderJobList(jobCache,_searchQ());
     });
@@ -1263,7 +1283,7 @@ function _renderJobList(jobs,q){
   }
   list.innerHTML=shown.map(j=>`
     <div class="kcard${j.triage_keep===0?' tri-dim':''}" style="cursor:pointer" data-platform="${j.platform}" data-job-id="${j.job_id}">
-      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片后按「抓取 JD 全文」获取">无 JD</span>'}${_triBadge(j)}${_statusPill(j)}</div>
+      <div class="kcard-title">${_hl(j.title,q)}${j.is_new!==false?'<span class="kcard-new">NEW</span>':'<span style="color:var(--text-3);font-size:10px;margin-left:6px">已见过</span>'}${_hasJd(j)?'':'<span class="jd-nobadge" title="还没有抓取该岗位的 JD；点开卡片后按「抓取 JD 全文」获取">无 JD</span>'}${_triBadge(j)}${_statusPill(j)}${_staleBadge(j)}</div>
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span>${_hl(j.salary,q)||'面议'}</span>
@@ -1284,10 +1304,17 @@ function _renderJobList(jobs,q){
   `).join('');
 }
 const rjb=document.getElementById('refreshJobsBtn');if(rjb)rjb.addEventListener('click',loadJobs);
-const oec=document.getElementById('onlyExpectedCity');if(oec)oec.addEventListener('change',loadJobs);
+const oec=document.getElementById('onlyExpectedCity');
+if(oec){
+  oec.checked=localStorage.getItem('jf_only_city')!=='0';   // 城市开关同样持久化
+  oec.addEventListener('change',()=>{localStorage.setItem('jf_only_city',oec.checked?'1':'0');loadJobs();});
+}
 // 排序切换 + 状态筛选（阶段2 A2）：状态下拉选项从 STATUS_META 派生，词汇表仍是唯一事实源
 const sortSel=document.getElementById('sortSel');
-if(sortSel)sortSel.addEventListener('change',()=>{_sortKey=sortSel.value;_renderJobList(jobCache,_searchQ())});
+if(sortSel){
+  sortSel.value=_sortKey;
+  sortSel.addEventListener('change',()=>{_sortKey=sortSel.value;_saveMktFilters();_renderJobList(jobCache,_searchQ())});
+}
 const statusSel=document.getElementById('statusSel');
 if(statusSel){
   STATUS_META.forEach(s=>{
@@ -1295,7 +1322,8 @@ if(statusSel){
     o.value=s.key;o.textContent='状态：'+s.name;
     statusSel.appendChild(o);
   });
-  statusSel.addEventListener('change',()=>{_statusFilter=statusSel.value;_renderJobList(jobCache,_searchQ())});
+  if(_statusFilter)statusSel.value=_statusFilter;
+  statusSel.addEventListener('change',()=>{_statusFilter=statusSel.value;_saveMktFilters();_renderJobList(jobCache,_searchQ())});
 }
 
 let kanbanCache=[];   // 看板全量岗位缓存（安排面试按钮取详情用）
@@ -1358,6 +1386,14 @@ function _termBadge(j){
   if(j.status==='offered')return '<span class="kcard-term offered" title="终态：已拿到 Offer">✓ 已 Offer</span>';
   if(j.status==='rejected')return '<span class="kcard-term rejected" title="终态：已判不合适">✗ 不合适</span>';
   return '';
+}
+// 轻量下架感知（新发现项）：last_seen 超 21 天没在抓取中出现过 → 灰角标提示；
+// 不做主动 404 探测——那要花抓取额度，点「查看原始岗位」人工核实更划算
+const _STALE_DAYS=21;
+function _staleBadge(j){
+  const ls=(j&&j.last_seen_at)||0;
+  if(!ls||Date.now()/1000-ls<_STALE_DAYS*86400)return '';
+  return `<span class="kcard-term" style="background:var(--bg-3);color:var(--text-3)" title="该岗位超过 ${_STALE_DAYS} 天未在抓取中出现过，可能已下线；点左下「查看原始岗位」核实">⏳ ${_STALE_DAYS} 天未刷新</span>`;
 }
 // 岗位市场卡片状态角标：终态沿用 _termBadge；评估中/已投递/面试中也要可见——
 // 此前非终态在市场里与未处理岗毫无区分，已投的岗还能一键点「不合适」
@@ -1553,7 +1589,8 @@ function showToast(title,msg,isErr){
     :'<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer=setTimeout(()=>t.classList.remove('show'),3000);
+  // 错误类停留 6 秒（红样式）：只闪 3 秒容易来不及看清失败原因；成功类维持 3 秒
+  toastTimer=setTimeout(()=>t.classList.remove('show'),err?6000:3000);
 }
 
 // Filter chips
@@ -1746,7 +1783,7 @@ async function loadProfileView(){
   refreshVersions();
 }
 
-// --- 评分 + 优化建议（profile_score 规则引擎） ---
+// --- 简历体检 + 优化建议（profile_score 规则引擎） ---
 async function refreshScore(){
   const num=document.getElementById('scoreNum');
   if(!num)return;
@@ -1768,7 +1805,7 @@ async function refreshScore(){
   const list=document.getElementById('adviceList');
   if(!list)return;
   if(!sc.checks.length){
-    list.innerHTML='<div style="text-align:center;padding:16px 6px;color:var(--text-3);font-size:12.5px">填写或采纳资料后，这里会给出评分与优化建议</div>';
+    list.innerHTML='<div style="text-align:center;padding:16px 6px;color:var(--text-3);font-size:12.5px">填写或采纳资料后，这里会给出简历体检评分与优化建议</div>';
     return;
   }
   const warn=sc.checks.filter(c=>!c.ok), ok=sc.checks.filter(c=>c.ok);
@@ -1854,7 +1891,7 @@ document.getElementById('newVersionBtn').addEventListener('click',async()=>{
   if(!currentProfile||!currentProfile.data||!Object.keys(currentProfile.data).length){
     showToast('还没有个人资料','先填写或采纳资料，再存为版本');return;
   }
-  const name=(prompt('版本名称（如：偏后端版 / 偏管理版）：','')||'').trim();
+  const name=((await _askText('版本名称（如：偏后端版 / 偏管理版）','','版本名称'))||'');
   if(!name)return;
   try{
     const r=await fetch('/api/profile/versions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
@@ -1899,6 +1936,7 @@ document.getElementById('settingsBtn').addEventListener('click',async()=>{
   await _ensureLlmConfigs();
   _llmCache=null; await _ensureLlmConfigs();   // 打开时强制刷新（密钥掩码最新）
   _renderLlmList();
+  _refreshBackups();
 });
 document.getElementById('llmModalClose').addEventListener('click',()=>document.getElementById('llmModal').style.display='none');
 document.getElementById('llmModal').addEventListener('click',e=>{if(e.target.id==='llmModal')e.target.style.display='none'});
@@ -2004,6 +2042,28 @@ document.getElementById('llmList').addEventListener('click',async e=>{
   }
 });
 
+// ===== 数据备份（C 组）：设置弹窗内一键备份 + 清单展示 =====
+async function _refreshBackups(){
+  const box=document.getElementById('backupList');
+  if(!box)return;
+  try{
+    const d=await(await fetch('/api/backup/list')).json();
+    box.textContent=d.backups.length
+      ?`已有 ${d.backups.length} 份备份（自动保留最近 ${d.keep} 份）：`+d.backups.slice(0,3).map(b=>b.name).join('、')+(d.backups.length>3?' …':'')
+      :'还没有备份。';
+  }catch(e){box.textContent='备份清单读取失败';}
+}
+document.getElementById('backupNowBtn').addEventListener('click',async()=>{
+  const btn=document.getElementById('backupNowBtn');
+  btn.disabled=true;btn.textContent='备份中…';
+  try{
+    const d=await(await fetch('/api/backup',{method:'POST'})).json();
+    if(d.ok){showToast('已备份',`已写入 data/backups/${d.name}${d.note?'（'+d.note+'）':''}`);_refreshBackups();}
+    else showToast('备份失败',d.error||'未知错误');
+  }catch(e){showToast('备份失败',e.message);}
+  finally{btn.disabled=false;btn.textContent='💾 立即备份';}
+});
+
 // ===== AI 简历润色（简历预览工具栏 ✨）：LLM 润色 → 行级 diff → 采纳写回 =====
 function _lineDiff(oldText,newText){
   const a=(oldText||'').split('\n'),b=(newText||'').split('\n');
@@ -2078,7 +2138,7 @@ document.getElementById('polishRunBtn').addEventListener('click',async()=>{
   finally{btn.disabled=false;btn.textContent='开始润色';}
 });
 document.getElementById('polishBackupBtn').addEventListener('click',async()=>{
-  const name=(prompt('备份版本名称（如：润色前备份）：','润色前备份')||'').trim();
+  const name=((await _askText('备份版本名称','润色前备份'))||'');
   if(!name)return;
   try{
     const r=await fetch('/api/profile/versions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
@@ -2571,8 +2631,30 @@ function _fmtMsgTime(ms){
   return `${d.getMonth()+1}-${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// ===== 消息中心：渲染 + 搜索过滤 =====
+// ===== 消息中心：渲染 + 搜索过滤 + 会话关联岗位（C 组）=====
 let msgCache=[];   // 全量会话缓存，搜索时本地过滤（不发请求）
+let _msgJobs=null;         // 会话↔岗位匹配用的全量岗位缓存（懒加载一次）
+let _msgMeta={total:0,truncated:false};   // 截断如实标注（后端 limit=500）
+async function _ensureMsgJobs(){
+  if(_msgJobs)return _msgJobs;
+  try{
+    const r=await fetch('/api/jobs?all_cities=true');
+    _msgJobs=(await r.json()).jobs||[];
+  }catch(e){_msgJobs=[];}
+  return _msgJobs;
+}
+// 会话→岗位模糊匹配：公司名/岗位名归一后互相包含（≥4 字防误伤），匹配不上不硬猜
+function _matchJobForMsg(m,jobs){
+  const norm=s=>String(s||'').toLowerCase().replace(/\s+/g,'');
+  const mc=norm(m.company_name),mj=norm(m.job_name);
+  if(!mc&&!mj)return null;
+  for(const j of jobs){
+    const jc=norm(j.company),jt=norm(j.title);
+    if(mc&&jc&&jc.length>=4&&(jc.includes(mc)||mc.includes(jc)))return j;
+    if(mj&&jt&&jt.length>=4&&(jt.includes(mj)||mj.includes(jt)))return j;
+  }
+  return null;
+}
 
 function _escHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function _hl(text,q){
@@ -2601,9 +2683,10 @@ function _renderMsgList(msgs,q){
     return;
   }
   const unread=msgs.reduce((a,m)=>a+(m.unread||0),0);
+  const totalText=_msgMeta.total?`共 ${_msgMeta.total} 个会话${_msgMeta.truncated?`（界面显示前 ${msgCache.length} 条）`:''}`:`共 ${msgs.length} 个会话`;
   if(summary)summary.textContent=q
     ? `匹配 ${msgs.length}/${msgCache.length} 个会话${unread?` · ${unread} 条未读`:''} · 关键词「${_escHtml(q)}」`
-    : `共 ${msgs.length} 个会话${unread?` · ${unread} 条未读`:''} · 数据来自 BOSS 直聘，手动刷新`;
+    : `${totalText}${unread?` · ${unread} 条未读`:''} · 数据来自 BOSS 直聘，手动刷新`;
   if(!msgs.length){
     list.innerHTML=`<div style="text-align:center;padding:60px 20px;color:var(--text-3)"><div style="font-size:42px;margin-bottom:12px">🔍</div><div style="font-size:14px">没有匹配「${_escHtml(q)}」的会话</div><div style="font-size:12px;margin-top:8px;color:var(--accent);cursor:pointer" onclick="clearGlobalSearch()">清空搜索，查看全部</div></div>`;
     return;
@@ -2615,6 +2698,7 @@ function _renderMsgList(msgs,q){
         <div style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:13px">${_hl(m.sender||'未知',q)}${m.unread?`<span class="is-new-pill">${m.unread} 未读</span>`:''}</div>
         <div style="font-size:12px;color:var(--text-2);margin-bottom:3px">${_hl([m.job_name,m.company_name].filter(Boolean).join(' · '),q)||'&nbsp;'}</div>
         <div style="font-size:12px;color:var(--text-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_hl(m.content,q)}</div>
+        ${m._job?`<div style="margin-top:4px"><span class="msg-job-link" data-platform="${m._job.platform}" data-job-id="${m._job.job_id}" title="按公司/岗位名匹配，点击打开岗位详情（JD 分析、打招呼语）" style="font-size:11px;color:var(--accent);cursor:pointer;text-decoration:underline">🗓 可能对应岗位：${_escHtml(m._job.title||'')}</span></div>`:''}
       </div>
       <div style="font-size:11px;color:var(--text-3);flex-shrink:0;align-self:flex-start;padding-top:2px">${_fmtMsgTime(m.time_ms)}</div>
     </div>
@@ -2629,7 +2713,11 @@ async function loadMessages(){
     const r=await fetch('/api/messages');
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
-    renderMessages(d.messages||[]);
+    _msgMeta={total:d.total||0,truncated:!!d.truncated};
+    const jobs=await _ensureMsgJobs();
+    const msgs=d.messages||[];
+    msgs.forEach(m=>{m._job=_matchJobForMsg(m,jobs);});
+    renderMessages(msgs);
   }catch(e){
     list.innerHTML=`<div style="text-align:center;padding:40px 20px;color:var(--red)">加载失败：${e.message}</div>`;
   }
@@ -2644,6 +2732,9 @@ if(rmb)rmb.addEventListener('click',async()=>{
     const r=await fetch('/api/messages/refresh',{method:'POST'});
     const d=await r.json();
     if(d.ok){
+      _msgMeta={total:d.total||0,truncated:!!d.truncated};
+      const jobs=await _ensureMsgJobs();
+      (d.messages||[]).forEach(m=>{m._job=_matchJobForMsg(m,jobs);});
       renderMessages(d.messages||[]);   // renderMessages 内部会带上当前搜索词重新过滤
       showToast('刷新成功',`拉取 ${d.fetched} 个会话${d.new?`，新增 ${d.new}`:''}${d.note?`（${d.note}）`:''}`);
     }else{
@@ -2730,6 +2821,7 @@ async function loadInterviews(){
           if(!rr.ok)throw new Error('HTTP '+rr.status);
           showToast('已保存',at?'面试时间已更新':'已清除面试时间');
           loadInterviews();
+          _refreshNotifBadge();
         }catch(e){
           showToast('保存失败',e.message);
           btn.disabled=false;btn.textContent='保存';
@@ -2741,6 +2833,83 @@ async function loadInterviews(){
   }
 }
 const rib=document.getElementById('refreshIvwBtn');if(rib)rib.addEventListener('click',loadInterviews);
+
+// ===== 🔔 面试提醒（C 组真化，原为装饰按钮）：未来 7 天面试角标 + 24h 内应用内/系统通知 =====
+let _notifShown=new Set();   // 已发过系统通知的岗位（会话内去重）
+function _upcomingInterviews(sch){
+  const dayStart=new Date();dayStart.setHours(0,0,0,0);
+  return (sch||[]).filter(j=>j.interview_at&&j.interview_at>=dayStart.getTime()&&j.interview_at<=Date.now()+7*_MS_DAY);
+}
+async function _refreshNotifBadge(){
+  const badge=document.getElementById('notifBadge');
+  if(!badge)return;
+  let d=null;
+  try{d=await(await fetch('/api/interviews')).json();}catch(e){return;}
+  const up=_upcomingInterviews((d&&d.scheduled)||[]);
+  const btn=document.getElementById('notifBtn');
+  if(up.length){
+    badge.textContent=up.length;badge.style.display='flex';
+    btn.title='未来 7 天有 '+up.length+' 场面试：'
+      +up.map(j=>`${(j.title||'').slice(0,12)} ${_ivwCountdown(j.interview_at).text}`).join('；')
+      +'。点击查看面试日程';
+  }else{
+    badge.style.display='none';
+    btn.title='面试提醒：暂无未来 7 天内的面试。安排面试后这里会出现角标';
+  }
+  // 24h 内的面试：进页面弹一次应用内 toast；系统通知只在已授权时发（授权动作在点击 🔔 时发生）
+  const soon=up.filter(j=>j.interview_at>Date.now()&&j.interview_at<=Date.now()+_MS_DAY);
+  if(soon.length){
+    const key=soon.map(j=>j.platform+'|'+j.job_id).join(',');
+    if(!_notifShown.has('toast:'+key)){
+      _notifShown.add('toast:'+key);
+      showToast('面试提醒',soon.map(j=>`${(j.title||'').slice(0,16)} · ${_ivwCountdown(j.interview_at).text}`).join('；'));
+    }
+    if('Notification' in window&&Notification.permission==='granted'){
+      soon.forEach(j=>{
+        const k=j.platform+'|'+j.job_id;
+        if(_notifShown.has(k))return;
+        _notifShown.add(k);
+        try{new Notification('面试提醒',{body:`${j.title||''} ${_ivwCountdown(j.interview_at).text}${j.interview_note?' · '+j.interview_note:''}`});}catch(e){}
+      });
+    }
+  }
+}
+document.getElementById('notifBtn').addEventListener('click',()=>{
+  // 用户手势时机申请通知权限（浏览器不允许页面自行弹授权框）
+  if('Notification' in window&&Notification.permission==='default'){
+    try{Notification.requestPermission().then(()=>_refreshNotifBadge()).catch(()=>{});}catch(e){}
+  }
+  const nav=document.querySelector('.nav-item[data-view="interviews"]');
+  if(nav)nav.click();
+});
+_refreshNotifBadge();
+setInterval(_refreshNotifBadge,30*60*1000);   // 每 30 分钟复查一次（安排/过期都会反映到角标）
+
+// ===== 通用输入模态（替代原生 prompt）：_askText(title, defval, placeholder) → Promise<string|null> =====
+let _promptDone=null;
+function _askText(title,defval,placeholder){
+  return new Promise(resolve=>{
+    const m=document.getElementById('promptModal');
+    const inp=document.getElementById('promptInput');
+    document.getElementById('promptTitle').textContent=title;
+    inp.value=defval||'';
+    if(placeholder)inp.placeholder=placeholder;else inp.removeAttribute('placeholder');
+    m.style.display='flex';
+    setTimeout(()=>{try{inp.focus();inp.select();}catch(e){}},50);
+    if(_promptDone)_promptDone(null);   // 上一次未收尾的模态直接作废
+    const finish=v=>{_promptDone=null;m.style.display='none';
+      document.removeEventListener('keydown',onKey);resolve(v);};
+    const ok=()=>finish(inp.value.trim());
+    const onKey=e=>{
+      if(e.key==='Enter')ok();
+      else if(e.key==='Escape')finish(null);
+    };
+    _promptDone=finish;
+    document.getElementById('promptOk').onclick=ok;
+    document.getElementById('promptCancel').onclick=()=>finish(null);
+    document.addEventListener('keydown',onKey);
+  });
+}
 
 // ===== 面试安排弹窗（看板卡片 / 面试日程页共用）=====
 let _ivwModalCtx=null;   // {job} 或 {picker:true}
@@ -2815,6 +2984,7 @@ async function _ivwModalSubmit(clear){
     if(!r.ok)throw new Error('HTTP '+r.status);
     showToast('已保存',at?'面试时间已设置，岗位状态已置为「面试中」':'已清除面试时间');
     closeIvwModal();
+    _refreshNotifBadge();   // 面试时间变了，🔔 角标立即跟上
     // 刷新当前相关页面
     const v=_activeViewId();
     if(v==='interviews')loadInterviews();
@@ -3167,7 +3337,7 @@ async function loadJobJd(j, refresh){
 // ===== Esc 关闭最上层弹窗（按 z-index 从高到低：220 润色/模型 → 210 详情 → 205 抓取/版本 → 200 面试）=====
 // 此前只有详情/面试弹窗支持 Esc，模型/润色/抓取/版本弹窗按 Esc 没反应；且各弹窗自听会在叠开时一次全关
 (function(){
-  const ORDER=['polishModal','llmModal','jobDetailModal','versionsModal','scrapeModal','ivwModal'];
+  const ORDER=['promptModal','polishModal','llmModal','jobDetailModal','versionsModal','scrapeModal','ivwModal'];
   document.addEventListener('keydown',e=>{
     if(e.key!=='Escape')return;
     for(const id of ORDER){

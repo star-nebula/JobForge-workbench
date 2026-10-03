@@ -94,3 +94,14 @@ def test_market_sort_and_status_filter(src):
     assert "statusSel.addEventListener" in src and "STATUS_META.forEach" in src
     assert 'data-tri-filter' in src
     assert "_clearAllFilters" in src
+
+
+def test_cd_polish_batch(src):
+    """C/D 打包批（2026-10-03）：🔔 真化接线、装饰按钮已删、筛选持久化、
+    下架角标、消息关联岗位、原生 prompt 已替换为输入模态。"""
+    assert 'id="notifBadge"' in src and "_refreshNotifBadge" in src   # 🔔 有角标与刷新逻辑
+    assert "<b>B</b>" not in src and "岗位适配" not in src            # 装饰按钮已删
+    assert "_saveMktFilters" in src and "jf_sort" in src               # 筛选/排序持久化
+    assert "_staleBadge" in src                                        # 下架感知角标
+    assert "_matchJobForMsg" in src                                    # 消息↔岗位关联
+    assert "_askText" in src and "prompt('" not in src                 # 原生 prompt 清零
