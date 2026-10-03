@@ -84,3 +84,13 @@ def test_each_status_has_reachable_control(src):
 def test_notes_field_is_sent(src):
     """后端一直收 notes，前端曾只发 {status}——备注必须真的发出去。"""
     assert re.search(r"notes:ni\.value", src)
+
+
+def test_market_sort_and_status_filter(src):
+    """阶段2 A2：市场默认排序=综合分（10-03 用户裁定）；状态下拉选项从 STATUS_META 派生；
+    粗筛留/走/未筛可点筛选。状态下拉若另写一份词汇表，这里会红。"""
+    assert re.search(r'<select id="sortSel".*?<option value="smart"', src, re.S)
+    assert "_sortKey='smart'" in src
+    assert "statusSel.addEventListener" in src and "STATUS_META.forEach" in src
+    assert 'data-tri-filter' in src
+    assert "_clearAllFilters" in src

@@ -156,6 +156,13 @@
   .jd-pill.thin b{color:var(--yellow)}
   .jd-pill.thin.active{border-color:var(--yellow);background:rgba(234,179,8,.12);color:#e6ca5e}
   .jd-pill.thin.active b{color:#e6ca5e}
+  /* 粗筛三态筛选胶囊（阶段2 A2）：留=绿 / 走=红 / 未筛=灰，点选只看对应集合 */
+  .jd-pill.tri-keep-pill b{color:var(--green)}
+  .jd-pill.tri-keep-pill.active{border-color:var(--green);background:rgba(34,197,94,.12);color:#8fdcae}
+  .jd-pill.tri-drop-pill b{color:var(--red)}
+  .jd-pill.tri-drop-pill.active{border-color:var(--red);background:rgba(239,68,68,.12);color:#f8a5a5}
+  .jd-pill.tri-none-pill b{color:var(--text-3)}
+  .jd-pill.tri-none-pill.active{border-color:var(--border-2);background:var(--bg-3)}
   .jd-pill-clear{color:var(--text-3);cursor:pointer}
   .jd-pill-clear:hover{color:var(--text)}
   .kcard-ai{background:rgba(59,130,246,.16);color:#7aa7f7;font-size:10px;font-weight:700;padding:1px 5px;border-radius:4px;white-space:nowrap}
@@ -782,7 +789,15 @@
           <div class="view-title">岗位市场 <small id="jobsSubtitle">已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small>
             <div class="jd-stats" id="jdStats" style="display:none"></div>
           </div>
-          <div style="display:flex;gap:8px;align-items:center">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <select id="sortSel" title="排序：综合分 = AI 精配分优先、没精配的按标签初筛分；初筛分 = 本地规则分；最新发现 = 抓取入库时间" style="background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:12.5px">
+              <option value="smart">排序：综合分（AI 优先）</option>
+              <option value="score">排序：标签初筛分</option>
+              <option value="new">排序：最新发现</option>
+            </select>
+            <select id="statusSel" title="按投递状态筛选岗位" style="background:var(--bg-3);border:1px solid var(--border);color:var(--text);padding:8px 10px;border-radius:8px;font-size:12.5px">
+              <option value="">状态：全部</option>
+            </select>
             <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-3);cursor:pointer;white-space:nowrap" title="非期望城市的岗位（09-22/09-25 两批按全国抓的残留）默认不进列表与抓取/分析队列；取消勾选可看全部">
               <input type="checkbox" id="onlyExpectedCity" checked style="accent-color:var(--accent)">只看期望城市
             </label>
@@ -1095,9 +1110,22 @@ let jobCache=[];   // 全量岗位缓存，搜索时本地过滤
 let _otherCityCount=0;  // 后端告知的「被 L0 城市门槛隐藏」的岗位数
 let _jdStats=null;      // 后端 JD 覆盖统计快照
 let _jdFilter='';       // '' | 'has' | 'missing' | 'thin'：按 JD 获取情况筛选
+let _triFilter='';      // '' | 'keep' | 'drop' | 'none'：按粗筛结论筛选（阶段2 A2）
+let _statusFilter='';   // '' = 全部，否则 STATUS_META 的 key（阶段2 A2）
+let _sortKey='smart';   // 'smart' = 综合分（AI 精配分优先、缺则初筛分）| 'score' | 'new'（10-03 用户裁定默认综合分）
 const JD_THIN_LEN=100;  // 与后端 db.JD_THIN_LEN 同口径
 function _hasJd(j){return !!(j&&j.jd_text&&String(j.jd_text).trim())}
 function _isThinJd(j){return _hasJd(j)&&String(j.jd_text).trim().length<JD_THIN_LEN&&!j.jd_confirmed}
+function _smartScore(j){
+  const ai=j&&j.llm_analysis&&j.llm_analysis.score;
+  return (ai!=null?ai:(j&&j.match_score)||0);
+}
+// 清全部市场筛选（JD/粗筛/状态），恢复当前排序的全量视图
+function _clearAllFilters(){
+  _jdFilter='';_triFilter='';_statusFilter='';
+  const ss=document.getElementById('statusSel');if(ss)ss.value='';
+  _renderJdStats();_renderJobList(jobCache,_searchQ());
+}
 function _matchJdFilter(j){
   if(_jdFilter==='has')return _hasJd(j);
   if(_jdFilter==='missing')return !_hasJd(j);
@@ -1145,6 +1173,7 @@ function _renderJdStats(){
   if(!s||!s.total){box.style.display='none';return;}
   box.style.display='flex';
   const pct=s.coverage;
+  const t=_triCounts(jobCache);
   box.innerHTML=`
     <span style="color:var(--text-3)">JD 获取情况：</span>
     <span class="jd-pill has ${_jdFilter==='has'?'active':''}" data-jd-filter="has" title="点击只看已获取 JD 的岗位">
@@ -1155,7 +1184,11 @@ function _renderJdStats(){
     </span>
     <span style="color:var(--text-3)" title="已获取 JD 的岗位占比">覆盖率 ${pct}%</span>
     ${s.thin?`<span class="jd-pill thin ${_jdFilter==='thin'?'active':''}" data-jd-filter="thin" title="JD 正文短于 100 字且未经人工确认：打开卡片可确认完整或重新抓取">⚠ 疑似残缺 <b>${s.thin}</b></span>`:''}
-    ${_jdFilter?`<span class="jd-pill-clear" id="jdFilterClear" title="清除筛选">✕ 清除筛选</span>`:''}
+    <span style="color:var(--text-3);margin-left:6px">粗筛：</span>
+    <span class="jd-pill tri-keep-pill ${_triFilter==='keep'?'active':''}" data-tri-filter="keep" title="点击只看智能粗筛判「值得精配」的岗位">✓ 留 <b>${t.keep}</b></span>
+    <span class="jd-pill tri-drop-pill ${_triFilter==='drop'?'active':''}" data-tri-filter="drop" title="点击只看粗筛判不匹配的岗位（列表里压暗显示）">✗ 走 <b>${t.drop}</b></span>
+    ${t.none?`<span class="jd-pill tri-none-pill ${_triFilter==='none'?'active':''}" data-tri-filter="none" title="点击只看还没跑粗筛的岗位；先点顶部「🧠 智能粗筛」">○ 未筛 <b>${t.none}</b></span>`:''}
+    ${(_jdFilter||_triFilter)?`<span class="jd-pill-clear" id="jdFilterClear" title="清除全部筛选（JD / 粗筛 / 状态）">✕ 清除筛选</span>`:''}
   `;
   box.querySelectorAll('[data-jd-filter]').forEach(el=>{
     el.addEventListener('click',()=>{
@@ -1165,8 +1198,16 @@ function _renderJdStats(){
       _renderJobList(jobCache,_searchQ());
     });
   });
+  box.querySelectorAll('[data-tri-filter]').forEach(el=>{
+    el.addEventListener('click',()=>{
+      const f=el.dataset.triFilter;
+      _triFilter=(_triFilter===f)?'':f;
+      _renderJdStats();
+      _renderJobList(jobCache,_searchQ());
+    });
+  });
   const clr=document.getElementById('jdFilterClear');
-  if(clr)clr.addEventListener('click',()=>{_jdFilter='';_renderJdStats();_renderJobList(jobCache,_searchQ())});
+  if(clr)clr.addEventListener('click',_clearAllFilters);
 }
 function _triCounts(jobs){
   const c={keep:0,drop:0,none:0};
@@ -1192,23 +1233,31 @@ function _renderJobList(jobs,q){
   _renderJdStats();
   let shown=q?_filterJobs(jobs,q):jobs;
   if(_jdFilter)shown=shown.filter(_matchJdFilter);
+  if(_statusFilter)shown=shown.filter(j=>(j.status||'discovered')===_statusFilter);
+  if(_triFilter==='keep')shown=shown.filter(j=>j.triage_keep===1);
+  else if(_triFilter==='drop')shown=shown.filter(j=>j.triage_keep===0);
+  else if(_triFilter==='none')shown=shown.filter(j=>j.triage_keep!==0&&j.triage_keep!==1);
+  // 排序（阶段2 A2）：默认综合分（AI 精配分优先、缺则初筛分）；同级按 last_seen 稳定
+  const keyF=_sortKey==='score'?(j=>j.match_score||0)
+            :_sortKey==='new'?(j=>j.last_seen_at||j.first_seen_at||0)
+            :_smartScore;
+  shown=[...shown].sort((a,b)=>keyF(b)-keyF(a)||((b.last_seen_at||0)-(a.last_seen_at||0)));
+  const _filtersOn=_jdFilter||_triFilter||_statusFilter;
   const sub=document.getElementById('jobsSubtitle');
   if(sub){
     const only=document.getElementById('onlyExpectedCity');
     const hiding=!!(only&&only.checked);
-    const t=_triCounts(jobs);
-    sub.innerHTML=`已缓存 <span id="jobsCount">${jobs.length}</span> 个岗位 · 按 last_seen 倒序`
+    const sortName=_sortKey==='smart'?'综合分（AI 优先）':_sortKey==='score'?'初筛分':'最新发现';
+    sub.innerHTML=`已缓存 <span id="jobsCount">${jobs.length}</span> 个岗位 · 按${sortName}倒序`
       +(_otherCityCount?` · ${hiding?'已隐藏':'含'} ${_otherCityCount} 个异地岗`:'')
-      +` · 粗筛 留<b style="color:#4ade80">${t.keep}</b>/走<b style="color:var(--red)">${t.drop}</b>`
-      +(t.none?`/未筛<b style="color:var(--text-3)">${t.none}</b>`:'')
-      +(_jdFilter?` · 当前显示 ${shown.length} 个（${_jdFilter==='has'?'已获取 JD':_jdFilter==='missing'?'未获取 JD':'疑似残缺 JD'}）`:'');
+      +(_filtersOn?` · 当前显示 ${shown.length} 个`:'');
   }
   if(!shown.length){
     list.innerHTML=`
       <div style="grid-column:1/-1;text-align:center;padding:60px 20px;color:var(--text-3)">
-        <div style="font-size:42px;margin-bottom:12px">${_jdFilter==='missing'?'🎉':'🔍'}</div>
-        <div style="font-size:14px">${_jdFilter==='missing'?'所有岗位都已获取 JD':(_jdFilter==='has'?'还没有岗位获取到 JD':(_jdFilter==='thin'?'没有疑似残缺的 JD':`没有匹配「${_escHtml(q)}」的岗位`))}</div>
-        <div style="font-size:12px;margin-top:8px"><span style="color:var(--accent);cursor:pointer" onclick="_jdFilter='';_renderJdStats();_renderJobList(jobCache,_searchQ())">清除筛选，查看全部</span></div>
+        <div style="font-size:42px;margin-bottom:12px">${_jdFilter==='missing'&&!_triFilter&&!_statusFilter?'🎉':'🔍'}</div>
+        <div style="font-size:14px">${!jobs.length?'还没有岗位':(_filtersOn?`没有符合当前筛选的岗位${q?`（含关键词「${_escHtml(q)}」）`:''}`:`没有匹配「${_escHtml(q)}」的岗位`)}</div>
+        <div style="font-size:12px;margin-top:8px"><span style="color:var(--accent);cursor:pointer" onclick="_clearAllFilters()">清除全部筛选，查看全部</span></div>
       </div>`;
     return;
   }
@@ -1236,6 +1285,18 @@ function _renderJobList(jobs,q){
 }
 const rjb=document.getElementById('refreshJobsBtn');if(rjb)rjb.addEventListener('click',loadJobs);
 const oec=document.getElementById('onlyExpectedCity');if(oec)oec.addEventListener('change',loadJobs);
+// 排序切换 + 状态筛选（阶段2 A2）：状态下拉选项从 STATUS_META 派生，词汇表仍是唯一事实源
+const sortSel=document.getElementById('sortSel');
+if(sortSel)sortSel.addEventListener('change',()=>{_sortKey=sortSel.value;_renderJobList(jobCache,_searchQ())});
+const statusSel=document.getElementById('statusSel');
+if(statusSel){
+  STATUS_META.forEach(s=>{
+    const o=document.createElement('option');
+    o.value=s.key;o.textContent='状态：'+s.name;
+    statusSel.appendChild(o);
+  });
+  statusSel.addEventListener('change',()=>{_statusFilter=statusSel.value;_renderJobList(jobCache,_searchQ())});
+}
 
 let kanbanCache=[];   // 看板全量岗位缓存（安排面试按钮取详情用）
 async function loadKanban(){
