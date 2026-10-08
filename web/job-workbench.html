@@ -1385,10 +1385,15 @@
         <label class="field-label" for="scrapePage">页码</label>
         <input id="scrapePage" class="input" type="number" min="1" value="1">
       </div>
+      <div class="field field--narrow">
+        <label class="field-label" for="pipelineLimit">精配上限</label>
+        <input id="pipelineLimit" class="input" type="number" min="1" max="50" value="10" title="一键流水线中 JD 精配的数量上限：抓取+粗筛完成后，最多精配这么多岗位的 JD（每个约 30~50 秒键鼠操作）；超出的粗筛保留岗留待下次手动精配">
+      </div>
       <div class="field field--wide">
         <label class="field-label" for="scrapeQuery">关键词</label>
         <div class="input-group">
           <input id="scrapeQuery" class="input" placeholder="留空 = 自动按简历解析意向岗位/技能；可输入任意词开新供给，如「Go 后端」「Grafana」">
+          <button class="btn" id="pipelineBtn" title="一键流水线：抓取岗位列表 → AI 智能粗筛 → 对粗筛保留的岗位逐个抓 JD 精配（受上方「精配上限」约束）。全程自动，期间接管键鼠，可随时暂停/停止"><svg class="i"><use href="#i-layers"/></svg>抓取并精配</button>
           <button class="btn primary" id="scrapeBtn"><svg class="i"><use href="#i-search"/></svg>开始智能抓取</button>
         </div>
       </div>
@@ -2725,10 +2730,13 @@ function _pollBatch(){
       const gate=await(await fetch('/api/scrape-progress')).json().catch(()=>null);
       const paused=!!(gate&&gate.paused), stopping=!!(gate&&gate.stopping);
       const tag=stopping?' · 停止中':(paused?' · 已暂停':'');
+      // 流水线时显示当前阶段（抓取/粗筛/精配），手动批量无 stage 字段则原样
+      const stageTag=s.stage?`[${s.stage}] `:'';
       chip.dataset.running=s.running?'1':'0';
+      chip.dataset.pipeline=s.pipeline?'1':'0';
       chip.innerHTML=s.running
-        ?`${ICO('cpu','i--12 spin')}${s.done}/${s.total}${s.failed?` · 失败 ${s.failed}`:''}${tag} · ${_escHtml(s.current||'…')}<b class="chip-act">${ICO('stop','i--12')}停止</b>`
-        :`${ICO('check','i--12')}完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}<b class="chip-act">收起</b>`;
+        ?`${ICO('cpu','i--12 spin')}${stageTag}${s.done}/${s.total}${s.failed?` · 失败 ${s.failed}`:''}${tag} · ${_escHtml(s.current||'…')}<b class="chip-act">${ICO('stop','i--12')}停止</b>`
+        :`${ICO('check','i--12')}${s.pipeline?'流水线':'批量精配'}完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}${s.errors&&s.errors.length?` · ${_escHtml(s.errors[s.errors.length-1]).slice(0,60)}`:''}<b class="chip-act">收起</b>`;
       if(!s.running){
         clearInterval(_batchTimer);_batchTimer=null;
         if(stopping)showToast('JD 精配已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
@@ -2741,7 +2749,8 @@ function _pollBatch(){
 document.getElementById('batchChip').addEventListener('click',async()=>{
   const chip=document.getElementById('batchChip');
   if(chip.dataset.running==='1'){
-    if(!confirm('停止JD 精配？已完成的部分会保留。'))return;
+    const isPipeline=chip.dataset.pipeline==='1';
+    if(!confirm(isPipeline?'停止流水线？当前阶段跑完即停，已完成的部分全部保留。':'停止JD 精配？已完成的部分会保留。'))return;
     chip.innerHTML=`${ICO('stop','i--12')}停止中…`;
     try{
       const d=await(await fetch('/api/analyze-batch/stop',{method:'POST'})).json();
@@ -3022,6 +3031,35 @@ document.getElementById('scrapeBtn').addEventListener('click',async()=>{
     btn.disabled=false;
     btn.innerHTML=origHTML;
   }
+});
+
+// --- 一键流水线：抓取 → 粗筛 → JD 精配（限额） ---
+document.getElementById('pipelineBtn').addEventListener('click',async()=>{
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角「AI 模型设置」添加模型后再用流水线');return;}
+  const ns=await(await fetch('/api/native/status')).json().catch(()=>null);
+  if(!ns||!ns.chrome_found||!ns.chrome_ready){
+    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化）');return;
+  }
+  const jdLimit=parseInt(document.getElementById('pipelineLimit').value)||10;
+  if(!confirm(`一键流水线（三阶段全自动）：\n\n① 抓取岗位列表（接管键鼠 15~60 秒/城）\n② AI 智能粗筛（纯 token，秒级）\n③ JD 精配：最多 ${jdLimit} 个（每个约 30~50 秒键鼠操作）\n\n期间请勿操作鼠标键盘；可随时在进度条点「停止」（当前阶段跑完即停，已完成部分保留）。\n预计总耗时 ${(2+Math.ceil(jdLimit*0.75))} 分钟上下。确定开始？`))return;
+  const btn=document.getElementById('pipelineBtn');
+  const orig=btn.innerHTML;
+  btn.disabled=true;btn.innerHTML=ICO('clock','spin')+'流水线启动中…';
+  try{
+    const r=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        query:(document.getElementById('scrapeQuery').value||'').trim()||null,
+        city:document.getElementById('scrapeCity').value||null,
+        page:parseInt(document.getElementById('scrapePage').value)||1,
+        jd_limit:jdLimit})});
+    const d=await r.json();
+    if(!d.ok){showToast('无法开始流水线',d.error||'未知错误');return;}
+    showToast('流水线已开始','抓取 → 粗筛 → 精配自动执行，进度见岗位市场顶部');
+    switchScrapeTab('results');
+    _pollBatch();
+  }catch(e){showToast('启动失败',e.message);}
+  finally{btn.disabled=false;btn.innerHTML=orig;}
 });
 
 function renderExtract(kw){

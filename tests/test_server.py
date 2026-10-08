@@ -8,8 +8,8 @@ import pytest
 from fastapi import HTTPException
 
 from jobforge import llm, server
-from jobforge.server import (AnalyzeBatchReq, CrawlReq, JdConfirmReq, ScrapeFromResumeReq,
-                             TriageReq, _get_llm_config, _mask_key)
+from jobforge.server import (AnalyzeBatchReq, CrawlReq, JdConfirmReq, PipelineReq,
+                             ScrapeFromResumeReq, TriageReq, _get_llm_config, _mask_key)
 
 
 def test_mask_key():
@@ -703,3 +703,166 @@ def test_messages_endpoint_reports_truncation(tmp_path, monkeypatch):
     assert r["total"] == 50 and len(r["messages"]) == 3 and r["truncated"] is True
     monkeypatch.setattr(server.db, "count_messages", lambda: 3)
     assert server.get_messages()["truncated"] is False
+
+
+# ---------- 一键流水线（2026-10-08）：抓取 → 粗筛 → 精配（限额），阶段边界停止 ----------
+
+def _pipeline_cleanup():
+    """流水线测试后的全局态复位（worker 在后台线程跑，monkeypatch 管不到 _batch/锁）。"""
+    server._batch.update({"running": False, "stop": False, "total": 0, "done": 0,
+                          "ok": 0, "failed": 0, "current": "", "errors": [],
+                          "stage": "", "pipeline": False})
+    if server._pipeline_lock.locked():
+        server._pipeline_lock.release()
+
+
+def _pipeline_env(monkeypatch, crawl_result=None, triage_keep=True, list_rows=None):
+    """流水线全 stub：预检全绿、抓取/粗筛/精配三段全部换成可断言的桩。
+    返回 calls dict 供断言（crawl/triage/batch 计数与 batch_jobs 队列）。"""
+    monkeypatch.setattr(server, "_get_llm_config",
+                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
+    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
+    monkeypatch.setattr(server, "_native_channel_status",
+                        lambda: {"ok": True, "chrome_found": True, "chrome_ready": True})
+    monkeypatch.setattr(server.db, "get_profile",
+                        lambda: {"data": {"city": "上海", "resume_text": _RESUME}})
+    monkeypatch.setattr(server.db, "add_scrape_log", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_ensure_hud", lambda: None)
+    monkeypatch.setattr(server, "_progress_start", lambda *a, **k: True)
+    monkeypatch.setattr(server, "_progress_update", lambda **k: None)
+    monkeypatch.setattr(server, "_progress_finish", lambda **k: None)
+    monkeypatch.setattr(server, "_progress_scope", lambda *a, **k: _NullScope())
+    calls = {"crawl": 0, "triage": 0, "batch": 0, "batch_jobs": []}
+
+    # 默认本次抓到 2 个新岗位（新岗 triage_keep 为 None，与真实 upsert 后的库状态一致）
+    new_jobs = [{"platform": "boss", "job_id": f"n{i}", "city": "上海",
+                 "title": "AI工程师", "tags": ["Python"]} for i in range(2)]
+    rows = list_rows if list_rows is not None else []
+    store = list(rows) + new_jobs          # 模拟 seen_jobs 表：save_job_triage 原地更新它
+    monkeypatch.setattr(server.db, "list_jobs",
+                        lambda status=None: [dict(r) for r in store])
+    monkeypatch.setattr(server.db, "upsert_jobs", lambda jobs: [True] * len(jobs))
+
+    def fake_save_triage(platform, job_id, keep, reason):
+        for r in store:
+            if r.get("job_id") == job_id:
+                r["triage_keep"] = 1 if keep else 0
+        return True
+    monkeypatch.setattr(server.db, "save_job_triage", fake_save_triage)
+
+    def fake_crawl(plat, q, c, page, mock):
+        calls["crawl"] += 1
+        if crawl_result is not None:
+            return crawl_result
+        return {"jobs": new_jobs, "source": "real", "platform": "boss",
+                "stats": {"total": len(new_jobs), "new": len(new_jobs), "seen": 0}}
+    monkeypatch.setattr(server.spider, "crawl", fake_crawl)
+
+    def fake_triage(cfg, pdata, jobs, chunk_size=llm.TRIAGE_CHUNK, progress=None):
+        calls["triage"] += 1
+        if progress:
+            progress(len(jobs), -(-len(jobs) // chunk_size))
+        return [{"platform": "boss", "job_id": j["job_id"], "keep": triage_keep,
+                 "reason": "r", "answered": True} for j in jobs]
+    monkeypatch.setattr(server.llm, "triage_jobs", fake_triage)
+
+    def fake_batch(jobs, cfg2, cancel):
+        calls["batch"] += 1
+        calls["batch_jobs"] = jobs
+        return False, ""
+    monkeypatch.setattr(server, "_batch_run", fake_batch)
+    return calls
+
+
+def _wait_pipeline_done(timeout_s=3.0):
+    """等流水线后台线程跑完（全 stub 毫秒级；跑不完即超时失败）。
+    返回结束时 _batch 的快照（cleanup 会清 errors，断言用快照）。"""
+    import time as _t
+    deadline = _t.time() + timeout_s
+    while _t.time() < deadline:
+        if not server._batch["running"]:
+            snap = {"errors": list(server._batch["errors"])}
+            _pipeline_cleanup()
+            return snap
+        _t.sleep(0.02)
+    _pipeline_cleanup()
+    raise AssertionError("流水线线程 3 秒内未结束")
+
+
+def test_pipeline_happy_path(monkeypatch):
+    """快乐路径：三段都被调用；结束后状态复位。"""
+    env = _pipeline_env(monkeypatch)
+    try:
+        r = server.start_pipeline(PipelineReq())
+        assert r["ok"] is True and r["started"] is True
+        _wait_pipeline_done()
+        assert env["crawl"] == 1 and env["triage"] == 1 and env["batch"] == 1
+        assert server._batch["pipeline"] is False and server._batch["stage"] == ""
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_scrape_error_aborts(monkeypatch):
+    """抓取失败 → 不进粗筛，错误信息落在 _batch.errors。"""
+    env = _pipeline_env(monkeypatch, crawl_result={"jobs": [], "source": "error",
+                                                   "platform": "boss", "error": "风控"})
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["crawl"] == 1 and env["triage"] == 0 and env["batch"] == 0
+        assert any("抓取失败" in e for e in snap["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_triage_all_dropped_stops(monkeypatch):
+    """粗筛判全部不匹配 → 不进精配，说明原因。"""
+    env = _pipeline_env(monkeypatch, triage_keep=False)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["triage"] == 1 and env["batch"] == 0
+        assert any("全部不匹配" in e for e in snap["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_jd_limit_truncates(monkeypatch):
+    """精配限额：本次新抓 5 个岗位全被粗筛 keep，jd_limit=2 → 精配队列只有 2 个。"""
+    new5 = [{"platform": "boss", "job_id": f"n{i}", "city": "上海",
+             "title": "AI工程师"} for i in range(5)]
+    env = _pipeline_env(monkeypatch, list_rows=new5)
+    try:
+        # 抓取也返回这 5 个岗位（list_rows 与 crawl 一致，triage 落库走 env 的 store）
+        monkeypatch.setattr(server.spider, "crawl",
+                            lambda plat, q, c, page, mock: {
+                                "jobs": new5, "source": "real", "platform": "boss",
+                                "stats": {"total": 5, "new": 5, "seen": 0}})
+        server.start_pipeline(PipelineReq(jd_limit=2))
+        _wait_pipeline_done()
+        assert env["batch"] == 1 and len(env["batch_jobs"]) == 2
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_rejected_when_batch_running(monkeypatch):
+    """已有批量精配在跑 → 流水线拒绝，不碰任何阶段。"""
+    env = _pipeline_env(monkeypatch)
+    try:
+        server._batch["running"] = True
+        r = server.start_pipeline(PipelineReq())
+        assert r["ok"] is False and "在跑" in r["error"]
+        assert env["crawl"] == 0
+    finally:
+        server._batch["running"] = False
+
+
+def test_pipeline_rejected_without_resume(monkeypatch):
+    """个人资料无简历文本 → 预检拒绝。"""
+    _pipeline_env(monkeypatch)
+    try:
+        monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+        r = server.start_pipeline(PipelineReq())
+        assert r["ok"] is False and "简历" in r["error"]
+    finally:
+        _pipeline_cleanup()

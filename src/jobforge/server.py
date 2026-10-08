@@ -30,6 +30,7 @@ FastAPI + spider.py
   POST /api/jobs/{platform}/{job_id}/jd-confirm   人工确认 JD 完整（疑似残缺 → 已获取）
   POST /api/analyze-batch      批量分析：抓 JD + 分析全部缺分析岗位（后台线程）
   GET  /api/analyze-batch/status / POST .../stop   批量进度查询 / 停止
+  POST /api/pipeline           一键流水线：抓取 → 粗筛 → JD 精配（限额，后台线程）
   GET  /api/scrape-progress    悬浮窗轮询：当前抓取任务进度（含暂停/停止态）
   POST /api/scrape-control     悬浮窗按钮：pause / resume / stop
   POST /api/hud/launch         手动打开悬浮进度窗（设置页开关）
@@ -659,7 +660,8 @@ class AnalyzeBatchReq(BaseModel):
 
 
 _batch = {"running": False, "stop": False, "total": 0, "done": 0,
-          "ok": 0, "failed": 0, "current": "", "errors": []}
+          "ok": 0, "failed": 0, "current": "", "errors": [],
+          "stage": "", "pipeline": False}
 # 批量取消：Event 传给 worker 与 _fetch_jd_core；procs 收集批量期间在跑的子进程，
 # stop 端点直接 kill（2026-09-27：标志位只在岗位边界检查 + 子进程最长阻塞 150s，
 # 点停止后要等几分钟才生效——用户实测「点了确认不会停」）
@@ -736,7 +738,8 @@ def start_analyze_batch(req: AnalyzeBatchReq):
         return {"ok": True, "started": False, **stats,
                 "message": "没有可精配的岗位" + ("：" + "、".join(why) if why else "")}
     _batch.update({"running": True, "stop": False, "total": len(jobs), "done": 0,
-                   "ok": 0, "failed": 0, "current": "", "errors": []})
+                   "ok": 0, "failed": 0, "current": "", "errors": [],
+                   "stage": "", "pipeline": False})
     _batch_cancel.clear()
     _ensure_hud()
     _progress_start("批量 AI 分析", "抓取 JD 并分析", total=len(jobs))
@@ -745,7 +748,9 @@ def start_analyze_batch(req: AnalyzeBatchReq):
     return {"ok": True, "started": True, "total": len(jobs), **stats}
 
 
-def _batch_worker(jobs, cfg, cancel: threading.Event):
+def _batch_run(jobs, cfg, cancel: threading.Event):
+    """批量精配循环体（抓 JD + 逐个分析）。手动批量与一键流水线共用：
+    前者在线程里跑，后者在流水线线程里同步调。状态写 _batch，进度走 _progress_*。"""
     consecutive_fail = 0
     stopped_by_user = False
     for j in jobs:
@@ -803,12 +808,19 @@ def _batch_worker(jobs, cfg, cancel: threading.Event):
         _batch["done"] += 1
         _progress_update(done=_batch["done"], ok=_batch["ok"], failed=_batch["failed"],
                          phase="抓取 JD 正文")
-    _batch["running"] = False
-    _batch["current"] = ""
     errs = _batch["errors"]
     # 停止位也要看闸门本身：用户在最后一个岗位的分析期间点「结束」时，
     # 循环已结束、stopped_by_user 来不及置位，但结果理应算「已停止」
-    _progress_finish(stopped=stopped_by_user or fetch_gate.stopped(),
+    return stopped_by_user or fetch_gate.stopped(), (errs[-1] if errs else "")
+
+
+def _batch_worker(jobs, cfg, cancel: threading.Event):
+    """手动批量精配的线程入口：跑循环体 + 收尾进度。"""
+    _batch_run(jobs, cfg, cancel)
+    _batch["running"] = False
+    _batch["current"] = ""
+    errs = _batch["errors"]
+    _progress_finish(stopped=fetch_gate.stopped(),
                      last_error=errs[-1] if errs else "")
 
 
@@ -834,6 +846,122 @@ def analyze_batch_stop():
         except Exception:
             pass
     return {"ok": True, "killed_procs": killed, "note": "当前岗位的 JD 抓取已中断，稍候 1~2 秒即停"}
+
+
+# ---------- 一键流水线：抓取 → 粗筛 → JD 精配（限额） ----------
+class PipelineReq(BaseModel):
+    query: Optional[str] = Field(None, description="抓取关键词，缺省按简历推导")
+    city: Optional[str] = Field(None, description="城市，缺省跟随个人资料的期望城市")
+    page: int = Field(1, ge=1, description="抓取页码")
+    jd_limit: int = Field(10, ge=1, le=50, description="本次精配的 JD 数量上限（风控额度把关）")
+    model_id: Optional[Any] = None
+    resume_text: str = Field("", description="端点内部填充，调用方无需传")
+
+
+_pipeline_lock = threading.Lock()   # 流水线与手动批量/手动粗筛互斥（共用 _batch 与 _triage_lock）
+
+
+def _pipeline_worker(req: PipelineReq, cfg: Dict):
+    """流水线主体：L0 抓取 → L1 粗筛 → L2 精配（限额）。在独立线程跑，
+    进度作为外层任务展示（内层 scrape_from_resume 的 _progress_scope 自动让位）。
+    停止语义=阶段边界：每段开始前检查闸门，段内停止则该段自然收尾、后续段不再开始。"""
+    try:
+        _progress_update(stage="抓取", phase="抓取岗位列表")
+        scrape_req = ScrapeFromResumeReq(
+            resume_text=req.resume_text, query=req.query, city=req.city, page=req.page)
+        scrape_res = scrape_from_resume(scrape_req)
+        if scrape_res.get("source") == "stopped":
+            _batch["errors"].append("抓取阶段被停止，流水线到此结束（已抓岗位已入库）")
+            return
+        if scrape_res.get("source") != "real":
+            _batch["errors"].append(f"抓取失败：{scrape_res.get('error') or '未知错误'}，流水线终止")
+            return
+        fetched = scrape_res.get("stats", {}).get("total", 0)
+        if _batch["stop"] or _batch_cancel.is_set() or fetch_gate.stopped():
+            return
+
+        _progress_update(stage="粗筛", phase="LLM 批量粗筛", current="")
+        # 只粗筛本次新抓入库的岗位（比 force 重筛全部更省 token，也不会翻旧账）
+        new_ids = [j.get("job_id") for j in (scrape_res.get("jobs") or []) if j.get("job_id")]
+        triage_res = start_triage(TriageReq(model_id=req.model_id,
+                                            job_ids=new_ids or None))
+        if not triage_res.get("ok"):
+            _batch["errors"].append(f"粗筛失败：{triage_res.get('error') or '未知错误'}，流水线终止")
+            return
+        if triage_res.get("total", 0) == 0:
+            # 抓取没进新岗（关键词太窄/城市没供给）——不是粗筛的错
+            _batch["errors"].append(
+                "没有需要粗筛的岗位（本次抓取无新增），流水线结束")
+            return
+        kept = triage_res.get("kept", 0)
+        if not kept:
+            _batch["errors"].append("粗筛判全部不匹配，没有岗位需要精配，流水线结束")
+            return
+        if _batch["stop"] or _batch_cancel.is_set() or fetch_gate.stopped():
+            return
+
+        _progress_update(stage="精配", phase="抓 JD 并分析", avg_sec=_ANALYZE_AVG_SEC)
+        jobs, stats = _analyze_queue(db.list_jobs(), AnalyzeBatchReq(limit=req.jd_limit))
+        if not jobs:
+            _batch["errors"].append(
+                "精配队列为空（粗筛结果可能已被分析过），流水线结束")
+            return
+        _batch["total"] = len(jobs)
+        _progress_update(total=len(jobs), done=0, ok=0, failed=0)
+        stopped, last_err = _batch_run(jobs, cfg, _batch_cancel)
+        if stopped:
+            _batch["errors"].append("精配阶段被停止，已完成岗位已保留")
+    except fetch_gate.Stopped as e:
+        _batch["errors"].append(f"流水线被停止：{e}")
+    except Exception as e:
+        _batch["errors"].append(f"流水线异常：{type(e).__name__}: {e}"[:160])
+    finally:
+        _batch["running"] = False
+        _batch["current"] = ""
+        _batch["stage"] = ""
+        _batch["pipeline"] = False
+        _progress_update(stage="", phase="")
+        _progress_finish(stopped=fetch_gate.stopped(),
+                         last_error=_batch["errors"][-1] if _batch["errors"] else "")
+
+
+@app.post("/api/pipeline")
+def start_pipeline(req: PipelineReq):
+    """一键流水线：抓取（吃键鼠/风控）→ 粗筛（纯 token）→ JD 精配（限额）。
+    预检在端点内做完（LLM 可用、原生通道就绪、有简历、无冲突任务在跑），
+    worker 开后台线程；进度复用 _batch 状态与悬浮窗，停止复用现有端点。"""
+    if _batch["running"]:
+        return {"ok": False, "error": "已有批量精配/流水线在跑，等它结束再开始流水线"}
+    if _triage_lock.locked():
+        return {"ok": False, "error": "已有智能粗筛在跑，等它结束再开始流水线"}
+    if _pipeline_lock.locked():
+        return {"ok": False, "error": "已有流水线在跑"}
+    pdata = (db.get_profile() or {}).get("data") or {}
+    resume_text = str(pdata.get("resume_text") or "").strip()
+    if not resume_text:
+        return {"ok": False, "error": "个人资料里没有简历文本：先在「个人资料」粘贴简历并采纳保存"}
+    cfg = _get_llm_config(req.model_id)
+    if not cfg:
+        return {"ok": False, "error": "尚未配置 AI 模型，请到「设置 → AI 模型」添加"}
+    try:
+        llm.chat(cfg, [{"role": "user", "content": "ping"}], timeout=15, max_tokens=5)
+    except llm.LLMError as e:
+        return {"ok": False, "error": f"模型配置不可用：{e}"}
+    ns = _native_channel_status()
+    if not (ns.get("chrome_found") and ns.get("chrome_ready")):
+        return {"ok": False, "error": "原生通道未就绪：" + (ns.get("error") or
+                "未找到打开 zhipin.com 的桌面 Chrome。请先打开 Chrome 登录 BOSS 直聘（窗口不要最小化）")}
+    if not _pipeline_lock.acquire(blocking=False):
+        return {"ok": False, "error": "已有流水线在跑"}
+    _batch.update({"running": True, "stop": False, "total": 0, "done": 0,
+                   "ok": 0, "failed": 0, "current": "", "errors": [],
+                   "stage": "抓取", "pipeline": True})
+    _batch_cancel.clear()
+    _ensure_hud()
+    _progress_start("一键流水线", "抓取岗位列表", total=1)
+    req.resume_text = resume_text
+    threading.Thread(target=_pipeline_worker, args=(req, cfg), daemon=True).start()
+    return {"ok": True, "started": True, "jd_limit": req.jd_limit}
 
 
 # ---------- 抓取进度（悬浮窗数据源）：岗位列表抓取 + 批量分析统一视图 ----------
@@ -1612,7 +1740,7 @@ def _kill_plan(info: Optional[Dict], listening_pid: Optional[int],
 
 
 def _busy_tasks(port: int) -> List[str]:
-    """旧实例手上有没有活：批量分析在跑 / 抓取任务活跃（含原生键鼠注入）。"""
+    """旧实例手上有没有活：批量分析/流水线在跑 / 抓取任务活跃（含原生键鼠注入）。"""
     checks = (("批量分析", "/api/analyze-batch/status", "running"),
               ("抓取任务", "/api/scrape-progress", "active"))
     return [name for name, path, key in checks if (_json_get(port, path) or {}).get(key)]
