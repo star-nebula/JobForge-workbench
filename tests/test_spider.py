@@ -6,7 +6,7 @@
 """
 from jobforge import spider as sp
 from jobforge.spider import (_city_code, _parse_salary_k, calc_match_score,
-                             extract_resume_keywords, is_same_city)
+                             extract_resume_keywords, is_same_city, split_cities)
 
 
 def test_extract_basic():
@@ -88,6 +88,75 @@ def test_extract_plain_text_still_works():
     assert kw["expected_salary"] == "30-50K"
     assert "JavaScript" in kw["skills"] and "React" in kw["skills"]
 
+
+# ---------- 多城市支持（2026-10-08：城市串拆分 + L0 门槛多城命中） ----------
+
+def test_split_cities():
+    """城市串拆分：顿号/逗号/斜杠/「市」后缀/去重保序。"""
+    assert split_cities("广州、深圳") == ["广州", "深圳"]
+    assert split_cities("广州，深圳/杭州") == ["广州", "深圳", "杭州"]
+    assert split_cities("广州市") == ["广州"]
+    assert split_cities("") == []
+    assert split_cities("全国") == ["全国"]
+    assert split_cities("深圳、深圳") == ["深圳"]
+
+
+def test_is_same_city_multi():
+    """L0 门槛多城语义：任一命中即 True；单城与全国行为不变。"""
+    assert is_same_city("深圳·南山区", "广州、深圳") is True
+    assert is_same_city("广州", "广州、深圳") is True
+    assert is_same_city("上海·浦东新区", "广州、深圳") is False
+    assert is_same_city("", "广州、深圳") is True
+    assert is_same_city("深圳", "全国") is True
+    assert is_same_city("深圳", "") is True
+
+
+def test_extract_resume_multi_city():
+    """简历解析期望城市支持多城串（原正则遇顿号截断只取到第一城）。"""
+    kw = extract_resume_keywords("期望城市：广州、深圳\n求职意向：AI应用开发工程师\n")
+    assert kw["city"] == "广州、深圳"
+
+
+def test_crawl_boss_multi_city_error_aggregates():
+    """crawl_boss 多城：城市码全认识时逐城抓取；mock 掉原生通道验证合并与错误聚合。"""
+    from jobforge import spider as sp
+
+    calls = []
+
+    def fake_native(query, city_code, page=1):
+        calls.append(city_code)
+        if city_code == sp.BOSS_CITY_CODES["深圳"]:
+            raise sp.fetch_jd_native.NativeError("风控")
+        return {"zpData": {"jobList": [
+            {"encryptJobId": f"job-{city_code}-1", "jobName": "AI工程师",
+             "brandName": "A公司", "cityName": "广州", "skills": ["Python"]},
+            {"encryptJobId": "job-dup", "jobName": "重复岗",
+             "brandName": "B公司", "cityName": "广州", "skills": []},
+        ]}}
+
+    orig = sp.fetch_jd_native.crawl_boss_native
+    sp.fetch_jd_native.crawl_boss_native = fake_native
+    try:
+        r = sp.crawl_boss("AI", "广州、深圳")
+        assert calls == [sp.BOSS_CITY_CODES["广州"], sp.BOSS_CITY_CODES["深圳"]]
+        assert r["source"] == "real"
+        # 深圳失败不拖垮广州；job-dup 只出现一次
+        assert len(r["jobs"]) == 2
+        assert sum(1 for j in r["jobs"] if j["job_id"] == "job-dup") == 1
+        assert r["error"] and "深圳" in r["error"]
+        # 全部失败 → source=error
+        calls.clear()
+        r2 = sp.crawl_boss("AI", "深圳")
+        assert r2["source"] == "error" and "风控" in r2["error"]
+    finally:
+        sp.fetch_jd_native.crawl_boss_native = orig
+
+
+def test_crawl_boss_multi_city_unknown_rejected():
+    """多城串中有不认识的城市 → 显式报错，绝不静默按全国搜（沿用单城语义）。"""
+    from jobforge import spider as sp
+    r = sp.crawl_boss("AI", "广州、宜宾")
+    assert r["source"] == "error" and "宜宾" in r["error"]
 
 # ---------- 薪资解析：单位归一 ----------
 

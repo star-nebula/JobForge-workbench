@@ -45,6 +45,21 @@ def _city_name(value: str) -> str:
     return name[:-1] if name.endswith("市") else name
 
 
+def split_cities(city: str) -> List[str]:
+    """「广州、深圳」→ ["广州", "深圳"]；去重保序，单城市/空串原样（剥「市」后缀）。
+
+    抓取层逐城调用；空串返回 []（调用方自行兜底「全国」）。"""
+    if not city:
+        return []
+    seen, out = set(), []
+    for part in re.split(r"[，,、/＋+]|\s+(?:或|和|及)\s+", str(city)):
+        name = _city_name(part)
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
 def _city_code(city: str) -> Optional[str]:
     """城市名 → BOSS 城市编码；认不出来返回 None，由调用方显式报错。
 
@@ -61,14 +76,15 @@ def _city_code(city: str) -> Optional[str]:
 def is_same_city(job_city: str, expected_city: str) -> bool:
     """L0 硬门槛：岗位城市是否属于期望城市（纯本地二值判定，不参与评分）。
 
+    期望城市支持多城（「广州、深圳」→ 任一命中即 True）。
     期望城市为空/「全国/不限」→ 不限城市，一律 True。
     岗位城市为空（抓取未给）→ True：不知道 ≠ 不匹配，与 calc_match_score 的中性分同口径。
     """
-    exp = _city_name(expected_city)
-    if not exp or exp in ("全国", "不限", "全部"):
+    exp_list = split_cities(expected_city)
+    if not exp_list or exp_list == ["全国"] or exp_list == ["不限"] or exp_list == ["全部"]:
         return True
     job = _city_name(job_city)
-    return True if not job else job == exp
+    return True if not job else job in exp_list
 
 # Cookie 文件路径（data/cookies.json），由浏览器登录后写入
 COOKIES_FILE = paths.data("cookies.json")
@@ -101,26 +117,55 @@ def crawl_boss(query: str, city: str = "全国", page: int = 1,
     已删除：静态 stoken 几分钟即失效（code=37），直调接口有风控风险。
     前提：桌面 Chrome 已打开并登录 zhipin.com；抓取接管键鼠约 8~15 秒，
     与 JD 抓取共享 18~35 秒节流。use_mock 参数已废弃（保留兼容签名）。
+
+    city 支持多城串（「广州、深圳」）：BOSS 单次搜索只接受一个城市编码，
+    逐城各抓一页后按 job_id 去重合并；单城失败不拖垮整体，错误汇总进 error。
     """
-    city_code = _city_code(city)
-    if not city_code:
+    cities = split_cities(city) or [""]
+    if len(cities) > 1 and not all(_city_code(c) for c in cities):
+        bad = "、".join(c for c in cities if not _city_code(c))
         supported = "、".join(c for c in BOSS_CITY_CODES if c != "全国")
         return {"jobs": [], "source": "error", "platform": "boss",
-                "error": f"城市「{city}」没有 BOSS 城市编码（可选：{supported}、全国；"
+                "error": f"城市「{bad}」没有 BOSS 城市编码（可选：{supported}、全国；"
                          f"或在个人资料里改城市）。已中止抓取，不会静默按全国搜。"}
-    try:
-        data = fetch_jd_native.crawl_boss_native(query, city_code, page)
-    except fetch_gate.Stopped:
-        # 用户点了「结束」：不是失败，向上抛出由 server 转成 stopped 结果
-        raise
-    except fetch_jd_native.NativeError as e:
-        return {"jobs": [], "source": "error", "platform": "boss", "error": str(e)}
-    except Exception as e:
-        return {"jobs": [], "source": "error", "platform": "boss",
-                "error": f"原生通道异常: {type(e).__name__}: {e}"}
-    raw = data.get("zpData", {}).get("jobList", []) or []
-    jobs = [_normalize_boss(j) for j in raw]
-    return {"jobs": jobs, "source": "real", "platform": "boss"}
+    jobs: List[Dict] = []
+    seen_ids: set = set()
+    errors: List[str] = []
+    stopped: Optional[fetch_gate.Stopped] = None
+    for c in cities:
+        city_code = _city_code(c)
+        if not city_code:
+            supported = "、".join(c for c in BOSS_CITY_CODES if c != "全国")
+            return {"jobs": [], "source": "error", "platform": "boss",
+                    "error": f"城市「{c}」没有 BOSS 城市编码（可选：{supported}、全国；"
+                             f"或在个人资料里改城市）。已中止抓取，不会静默按全国搜。"}
+        try:
+            data = fetch_jd_native.crawl_boss_native(query, city_code, page)
+        except fetch_gate.Stopped as e:
+            # 用户点了「结束」：记录住，已完成城市的岗位照常返回，循环终止
+            stopped = e
+            break
+        except fetch_jd_native.NativeError as e:
+            errors.append(f"[{c or '全国'}] {e}")
+            continue
+        except Exception as e:
+            errors.append(f"[{c or '全国'}] 原生通道异常: {type(e).__name__}: {e}")
+            continue
+        raw = data.get("zpData", {}).get("jobList", []) or []
+        for j in raw:
+            n = _normalize_boss(j)
+            jid = n.get("job_id") or ""
+            if jid and jid in seen_ids:
+                continue
+            if jid:
+                seen_ids.add(jid)
+            jobs.append(n)
+    if stopped is not None:
+        raise fetch_gate.Stopped(f"{stopped}（已完成 {len(jobs)} 个岗位的抓取，均已保留）")
+    if not jobs and errors:
+        return {"jobs": [], "source": "error", "platform": "boss", "error": "；".join(errors)}
+    return {"jobs": jobs, "source": "real", "platform": "boss",
+            "error": "；".join(errors) if errors else None}
 
 
 def _normalize_boss(item: Dict) -> Dict:
@@ -309,8 +354,8 @@ def extract_resume_keywords(resume_text: str) -> Dict[str, Any]:
     text = _normalize_markdown(resume_text or "")
     text = _merge_two_column_basics(text)
 
-    # 提取期望城市
-    city_match = re.search(r"(期望城市|工作地点|所在地)[：:\s]*([\u4e00-\u9fa5]+)", text)
+    # 提取期望城市（支持多城：「广州、深圳」顿号/逗号/斜杠分隔）
+    city_match = re.search(r"(期望城市|工作地点|所在地)[：:\s]*([\u4e00-\u9fa5]+(?:[，,、/][\u4e00-\u9fa5]+)*)", text)
     city = city_match.group(2) if city_match else "全国"
 
     # 提取期望岗位
