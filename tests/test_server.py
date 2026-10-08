@@ -716,7 +716,8 @@ def _pipeline_cleanup():
         server._pipeline_lock.release()
 
 
-def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None, list_rows=None):
+def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None,
+                  jd_timeout_ids=None, list_rows=None, new_jobs=None):
     """流水线全 stub：预检全绿、抓取/粗筛/精配三段全部换成可断言的桩。
     返回 calls dict 供断言（crawl/triage/batch 计数与 batch_jobs 队列）。"""
     monkeypatch.setattr(server, "_get_llm_config",
@@ -735,8 +736,8 @@ def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None, list_rows=No
     calls = {"crawl": 0, "jd": 0, "analyze": 0, "analyzed_jobs": []}
 
     # 默认本次抓到 2 个新岗位（与真实 upsert 后的库状态一致）
-    new_jobs = [{"platform": "boss", "job_id": f"n{i}", "city": "上海",
-                 "title": "AI工程师", "tags": ["Python"]} for i in range(2)]
+    new_jobs = new_jobs or [{"platform": "boss", "job_id": f"n{i}", "city": "上海",
+                             "title": "AI工程师", "tags": ["Python"]} for i in range(2)]
     rows = list_rows if list_rows is not None else []
     store = list(rows) + new_jobs          # 模拟 seen_jobs 表：save_jd/save_analysis 原地更新它
     monkeypatch.setattr(server.db, "list_jobs",
@@ -773,10 +774,13 @@ def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None, list_rows=No
                 "stats": {"total": len(new_jobs), "new": len(new_jobs), "seen": 0}}
     monkeypatch.setattr(server.spider, "crawl", fake_crawl)
 
-    # JD 抓取：默认全部成功写回 JD 文本；jd_fail_ids 里的失败
+    # JD 抓取：默认全部成功写回 JD 文本；jd_fail_ids 里的失败；jd_timeout_ids 里模拟 150s 软锁超时
     fail_ids = jd_fail_ids or set()
+    timeout_ids = jd_timeout_ids or set()
     def fake_fetch_jd(job, refresh=False, cancel=None):
         calls["jd"] += 1
+        if job["job_id"] in timeout_ids:
+            return {"ok": False, "error": "抓取超时（150s）；直连亦未解析到 JD，可点下方链接在 BOSS 查看"}
         if job["job_id"] in fail_ids:
             return {"ok": False, "error": "风控"}
         fake_save_jd(job["platform"], job["job_id"], f"JD正文-{job['job_id']}")
@@ -837,7 +841,8 @@ def test_pipeline_no_new_jobs_stops(monkeypatch):
     """抓取成功但无新岗位 → 直接结束并说明。"""
     env = _pipeline_env(monkeypatch,
                         crawl_result={"jobs": [], "source": "real", "platform": "boss",
-                                      "stats": {"total": 0, "new": 0, "seen": 0}})
+                                      "stats": {"total": 0, "new": 0, "seen": 0}},
+                        new_jobs=[])
     try:
         server.start_pipeline(PipelineReq())
         snap = _wait_pipeline_done()
@@ -879,5 +884,37 @@ def test_pipeline_rejected_without_resume(monkeypatch):
         monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
         r = server.start_pipeline(PipelineReq())
         assert r["ok"] is False and "简历" in r["error"]
+    finally:
+        _pipeline_cleanup()
+
+def test_pipeline_timeout_circuit_breaks(monkeypatch):
+    """BOSS 软锁（连续 150s 超时）→ 连 2 次即熔断，不再空烧剩余岗位；
+    结尾提示冷却与剩余数量。"""
+    tjobs = [{"platform": "boss", "job_id": f"t{i}", "city": "上海",
+              "title": "AI工程师"} for i in range(5)]
+    env = _pipeline_env(monkeypatch, jd_timeout_ids={"t0", "t1", "t2", "t3", "t4"},
+                        list_rows=[], new_jobs=tjobs)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["jd"] == 2                      # 连 2 次超时即熔断，第 3 个没试
+        assert env["analyze"] == 0                 # 没有成功 JD，不进分析
+        assert any("已自动熔断" in e and "软性限流" in e for e in snap["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_timeout_then_success_resets_counter(monkeypatch):
+    """单次超时夹在成功之间不触发熔断（计数只在连续超时时累积）。"""
+    mjobs = [{"platform": "boss", "job_id": f"m{i}", "city": "上海",
+              "title": "AI工程师"} for i in range(3)]
+    # m0 超时，m1/m2 成功 → 不熔断，分析 2 个
+    env = _pipeline_env(monkeypatch, jd_timeout_ids={"m0"}, list_rows=[], new_jobs=mjobs)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["jd"] == 3 and env["analyze"] == 2
+        assert not any("已自动熔断" in e for e in snap["errors"])
+        assert any("JD 抓取失败" in e or "1 个岗位" in e for e in snap["errors"])
     finally:
         _pipeline_cleanup()

@@ -891,9 +891,9 @@ def _pipeline_worker(req: PipelineReq, cfg: Dict):
         _batch["done"] = 0
         _batch["ok"] = 0
         _batch["failed"] = 0
-        # 临时替换分析步：_batch_run 循环体里 JD 抓完即调 analyze_match；
-        # 抓 JD 段只想要 JD。不复用循环体，改用精简循环（JD 缓存直读 + 降级都走 _fetch_jd_core）
-        for j in new_jobs:
+        consecutive_timeout = 0    # 连续 150s 超时计数：BOSS 软锁是静默挂起（不报错不弹码），
+        TRIAGE_CIRCUIT = 2         # 唯一信号就是超时；连 2 次即熔断——每岗空烧 150s×3 层
+        for j in new_jobs:         # 降级太贵，2 次已足确认（2026-10-08 实测：软锁下连烧 12 岗全超时）
             if _batch["stop"] or _batch_cancel.is_set():
                 break
             try:
@@ -905,12 +905,26 @@ def _pipeline_worker(req: PipelineReq, cfg: Dict):
             jd_res = _fetch_jd_core(j, refresh=False, cancel=_batch_cancel)
             if jd_res.get("ok"):
                 _batch["ok"] += 1
+                consecutive_timeout = 0
+            elif jd_res.get("stopped"):
+                break
             else:
                 if _batch_cancel.is_set() or fetch_gate.stopped():
                     break
                 _batch["failed"] += 1
                 if len(_batch["errors"]) < 20:
                     _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {jd_res.get('error') or 'JD 抓取失败'}"[:160])
+                if "抓取超时" in (jd_res.get("error") or ""):
+                    consecutive_timeout += 1
+                    if consecutive_timeout >= TRIAGE_CIRCUIT:
+                        remaining = len(new_jobs) - _batch["done"] - 1
+                        _batch["errors"].append(
+                            f"已自动熔断：连续 {consecutive_timeout} 个岗位 150s 超时，"
+                            f"判定 BOSS 软性限流（静默挂起不报错）。建议 1~2 小时后重抓剩余 "
+                            f"{max(0, remaining)} 个岗位（失败岗可在详情弹窗单独补抓）"[:160])
+                        break
+                else:
+                    consecutive_timeout = 0
             _batch["done"] += 1
             _progress_update(done=_batch["done"], ok=_batch["ok"], failed=_batch["failed"])
 
