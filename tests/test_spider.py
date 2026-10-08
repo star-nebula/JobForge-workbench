@@ -266,6 +266,26 @@ def test_match_score_unknown_is_neutral():
     assert sd["salary_match"] == 50
 
 
+def test_match_score_no_tags_title_fallback():
+    """岗位无标签（BOSS 部分岗位 skills/jobLabels 均空）：不再吃固定 50，
+    从标题提取技能词给真信号；标题无技能词但方向匹配给 55 弱中性。"""
+    # 标题写明 vue → 技能命中，分数高于中性
+    kw_fe = {"skills": ["Vue", "TypeScript"], "target_position": "前端开发工程师",
+             "city": "上海", "expected_salary": ""}
+    job = {"title": "vue前端开发工程师", "city": "上海", "salary": "15-25K", "tags": []}
+    sd = calc_match_score(job, kw_fe)
+    assert sd["skills_match"] == 70          # 60 + 10×1 个标题命中
+    # 标题无技能词但意向方向命中标题 → 55 弱中性
+    kw_ai = {"skills": ["Python", "LangChain"], "target_position": "AI应用开发工程师",
+             "city": "上海", "expected_salary": ""}
+    job2 = {"title": "AI应用开发工程师", "city": "上海", "salary": "", "tags": []}
+    assert calc_match_score(job2, kw_ai)["skills_match"] == 55
+    # 简历无技能 → 仍 50（缺失侧兜底不变）
+    job3 = {"title": "前端", "city": "上海", "salary": "", "tags": []}
+    kw_empty = {"skills": [], "target_position": "前端", "city": "上海", "expected_salary": ""}
+    assert calc_match_score(job3, kw_empty)["skills_match"] == 50
+
+
 def test_match_score_city_mismatch():
     job = {"title": "前端", "city": "上海", "salary": "", "tags": []}
     kw = {"skills": ["React"], "target_position": "前端", "city": "北京", "expected_salary": ""}

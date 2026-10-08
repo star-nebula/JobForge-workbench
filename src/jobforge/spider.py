@@ -514,11 +514,27 @@ def calc_match_score(job: Dict, resume_keywords: Dict[str, Any]) -> Dict[str, An
     # 1) 技能匹配度：简历技能命中「技能样」岗位标签的比例（分母=岗位技能要求数）
     if not resume_skills or not skill_tag_norms:
         skills_match = 50                      # 任一缺失＝无法判断，中性分
+        no_tag_fallback = not skill_tag_norms and bool(resume_skills)
     else:
+        no_tag_fallback = False
         skill_norms = [_norm_skill(s) for s in resume_skills]
         hits = sum(1 for sn in skill_norms if sn and sn in skill_tag_norms)
         skills_match = min(100, round(hits / len(skill_tag_norms) * 100))
 
+    # 1b) 岗位没给任何标签（BOSS 部分岗位 skills/jobLabels 均空，实测约 5%）：
+    #     35% 权重直接吃 50 会把整体无理由压低 ~10 分。改从标题提取技能词——
+    #     标题常写明「vue前端」「Java开发」，能给出真信号；提取不到再退中性分。
+    if no_tag_fallback:
+        title_norm = _norm_skill(re.sub(r"[（(【\[].*?[）)】\]]", "", job_title))
+        title_hits = [s for s, sn in zip(resume_skills, [_norm_skill(s) for s in resume_skills])
+                      if sn and len(sn) >= 2 and sn in title_norm]
+        if title_hits:
+            skills_match = min(100, 60 + 10 * len(title_hits))
+        else:
+            # 标题里也没有可认的技能词：若意向岗位与标题匹配，视为「技能面未知但方向对」，
+            # 给 55 弱中性；否则维持 50
+            core = _SENIORITY_RE.sub("", (resume_keywords.get("target_position") or "")).strip(" ·-/")
+            skills_match = 55 if (core and core.lower() in job_title) else 50
     # 2) 经验匹配度：意向岗位剥掉职级词与通用角色词得「领域词」（前端），
     #    领域词命中标题（且有角色词佐证）即高分；否则退回序列相似度分档
     if not target:
