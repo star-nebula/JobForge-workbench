@@ -2192,7 +2192,14 @@ function renderResumePreview(){
 
 // --- 解析并比对：简历文本 → 候选资料 → 差异确认 ---
 function _firstLineName(text){
-  const line=(text||'').split('\n').map(s=>s.trim()).find(Boolean)||'';
+  const lines=(text||'').split('\n').map(s=>s.trim()).filter(Boolean);
+  // 「姓名：xxx」字段优先（Markdown 简历首行常是标题/表头，不是姓名）
+  for(const line of lines){
+    const m=line.match(/^(?:#{0,6}\s*)?(?:\*{0,3})?姓名(?:\*{0,3})?\s*[：:]\s*(?:\*{0,3})?([^\s*：:]{2,12})(?:\*{0,3})?$/);
+    if(m)return m[1];
+  }
+  // 兜底：第一个非标题/非表头/非字段行且形似姓名（≤12字、无冒号无数字）
+  const line=lines.find(s=>!/^#{1,6}\s/.test(s)&&!/^\|/.test(s)&&!/[:：]/.test(s))||'';
   return (line&&line.length<=12&&!/[:：\d]/.test(line))?line:'';
 }
 function buildParsedProfile(text,kw){

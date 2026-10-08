@@ -26,6 +26,69 @@ def test_extract_empty_defaults():
     assert kw["skills"] == []
 
 
+# ---------- Markdown 简历解析（2026-10-08：归一化后与纯文本同链路） ----------
+
+def test_extract_markdown_full():
+    """Markdown 简历：井号标题/加粗/列表/尖括号邮箱/两列基本信息。"""
+    text = (
+        "# 基本信息\n\n"
+        "姓名：刘昊晴    出生年月：2003年5月\n"
+        "性别：男    求职意向：AI应用开发工程师\n"
+        "电话：13392786414    邮箱：<liu@example.com>\n"
+        "个人博客：https://example.com/vault/\n\n"
+        "# 教育经历\n\n2021~2025 岭南师范学院 人工智能\n\n"
+        "# 专业技能\n\n"
+        "**大模型与RAG、多Agent开发：**\n\n"
+        "- 深入理解 Transformer 架构，掌握 LLM 底层原理，具备 DeepSeek、Qwen 等大模型调用经验\n"
+        "- 熟悉LoRA、P-Tuning等微调方案，熟练 LangChain框架\n"
+        "- 依托 Function Calling 与 ReAct 自主推理，掌握 MCP、A2A 协议\n\n"
+        "# 工作经历\n\n### **2026.07 ~ 2026.08 | 品质生活 | AI技术负责人**\n\n从0搭建AI部门。\n\n"
+        "# 项目经历\n\n### 选品简报系统 2025.10 ~ 2026.05\n\n基于LangGraph+DeepSeek。\n"
+    )
+    kw = extract_resume_keywords(text)
+    assert kw["target_position"] == "AI应用开发工程师"
+    # sections 五桶正确分段（井号标题剥掉后仍可识别）
+    assert "岭南师范学院" in kw["sections"]["education"]
+    assert "AI技术负责人" in kw["sections"]["experience"]
+    assert "LangGraph" in kw["sections"]["projects"]
+    # 技能表无动词前缀/噪声/装饰符
+    skills = kw["skills"]
+    for s in ("Transformer", "LLM", "DeepSeek", "Qwen", "LoRA", "LangChain",
+              "FunctionCalling", "ReAct", "MCP", "A2A"):
+        assert s in skills, f"缺少 {s}: {skills}"
+    assert not any(s.startswith(("熟悉", "掌握", "深入")) for s in skills)
+    assert "**" not in " ".join(skills)
+
+
+def test_extract_markdown_two_column_basics():
+    """两列基本信息：同行「邮箱：xx 邮箱：yy」在已知标签处拆行。"""
+    text = ("姓名：张三    电话：13312345678    邮箱：<a@b.com>\n"
+            "求职意向：后端开发\n\n专业技能\nPython, Go, Redis\n")
+    kw = extract_resume_keywords(text)
+    assert "电话：13312345678" in kw["sections"]["basics"]
+    assert "邮箱：a@b.com" in kw["sections"]["basics"]
+    assert kw["target_position"] == "后端开发"
+
+
+def test_extract_skill_multiword_merge_whitelist():
+    """多词技术名只按白名单合并：Function Calling 合并；空格分隔的独立技能不串词。"""
+    kw = extract_resume_keywords("技能专长：Function Calling ReAct\n")
+    assert "FunctionCalling" in kw["skills"] and "ReAct" in kw["skills"]
+    kw2 = extract_resume_keywords("技能专长：JavaScript TypeScript React\n")
+    assert kw2["skills"] == ["JavaScript", "TypeScript", "React"]
+
+
+def test_extract_plain_text_still_works():
+    """纯文本简历回归：归一化对纯文本幂等，原解析语义不变。"""
+    text = ("李四\n求职意向：前端工程师\n期望城市：上海\n期望薪资：30-50K\n"
+            "技能专长：JavaScript TypeScript React\n工作经历：\n负责开发")
+    kw = extract_resume_keywords(text)
+    assert kw["target_position"] == "前端工程师"
+    assert kw["city"] == "上海"
+    assert kw["expected_salary"] == "30-50K"
+    assert "JavaScript" in kw["skills"] and "React" in kw["skills"]
+
+
 # ---------- 薪资解析：单位归一 ----------
 
 def test_parse_salary_units():
