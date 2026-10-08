@@ -1702,13 +1702,29 @@ def _json_get(port: int, path: str) -> Optional[Dict]:
     return data if isinstance(data, dict) else None
 
 
+def _run_cli(cmd: List[str], timeout: int = 10) -> str:
+    """跑 Windows 命令行工具（netstat/tasklist），输出按文本返回。
+
+    encoding 不能交给系统默认：PYTHONUTF8=1 环境下强制 utf-8，而中文系统
+    netstat 输出是 GBK（列头「活动连接」），reader 线程直接 UnicodeDecodeError
+    崩掉 → stdout 为空 → 重启保护误判。errors=replace 双保险。"""
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if isinstance(out.stdout, str):        # 已是文本（如测试桩直接给 CompletedProcess(str)）
+        return out.stdout
+    for enc in ("gbk", "utf-8"):
+        try:
+            return out.stdout.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return out.stdout.decode("utf-8", errors="replace")
+
+
 def _port_owner_pid(port: int) -> Optional[int]:
     """netstat 查出正在 LISTENING 该端口的 PID。查不到返回 None（调用方据此拒绝动手）。"""
-    try:
-        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, timeout=10).stdout or ""
-    except (OSError, subprocess.SubprocessError):
-        return None
+    out = _run_cli(["netstat", "-ano", "-p", "TCP"])
     for line in out.splitlines():
         f = line.split()
         if len(f) >= 5 and f[0] == "TCP" and f[1].endswith(f":{port}") and f[3] == "LISTENING":
@@ -1763,8 +1779,7 @@ def _stop_existing(port: int) -> bool:
     print(f"[JobForge] {why}")
     if not ok:
         return False
-    subprocess.run(["taskkill", "/PID", str(_port_owner_pid(port)), "/T", "/F"],
-                   capture_output=True, text=True, timeout=15)
+    _run_cli(["taskkill", "/PID", str(_port_owner_pid(port)), "/T", "/F"], timeout=15)
     for _ in range(50):                    # 最长 10 秒：端口不释放就别硬启
         status, _body = _http_get(port, "/api/whoami")
         if status is None:
