@@ -853,17 +853,17 @@ class PipelineReq(BaseModel):
     query: Optional[str] = Field(None, description="抓取关键词，缺省按简历推导")
     city: Optional[str] = Field(None, description="城市，缺省跟随个人资料的期望城市")
     page: int = Field(1, ge=1, description="抓取页码")
-    jd_limit: int = Field(10, ge=1, le=50, description="本次精配的 JD 数量上限（风控额度把关）")
     model_id: Optional[Any] = None
     resume_text: str = Field("", description="端点内部填充，调用方无需传")
 
 
-_pipeline_lock = threading.Lock()   # 流水线与手动批量/手动粗筛互斥（共用 _batch 与 _triage_lock）
+_pipeline_lock = threading.Lock()   # 流水线与手动批量互斥（共用 _batch）
 
 
 def _pipeline_worker(req: PipelineReq, cfg: Dict):
-    """流水线主体：L0 抓取 → L1 粗筛 → L2 精配（限额）。在独立线程跑，
-    进度作为外层任务展示（内层 scrape_from_resume 的 _progress_scope 自动让位）。
+    """流水线主体（2026-10-08 简化，用户裁定）：抓列表 → 本次新岗位逐个抓 JD
+    （跳过已有缓存）→ 全部到手后一次性 AI 分析。不再有粗筛与限额——用户裁定
+    「抓全部 JD 只是多花时间，无所谓」，以流程简单换 JD 额度。
     停止语义=阶段边界：每段开始前检查闸门，段内停止则该段自然收尾、后续段不再开始。"""
     try:
         _progress_update(stage="抓取", phase="抓取岗位列表")
@@ -876,41 +876,79 @@ def _pipeline_worker(req: PipelineReq, cfg: Dict):
         if scrape_res.get("source") != "real":
             _batch["errors"].append(f"抓取失败：{scrape_res.get('error') or '未知错误'}，流水线终止")
             return
-        fetched = scrape_res.get("stats", {}).get("total", 0)
-        if _batch["stop"] or _batch_cancel.is_set() or fetch_gate.stopped():
-            return
-
-        _progress_update(stage="粗筛", phase="LLM 批量粗筛", current="")
-        # 只粗筛本次新抓入库的岗位（比 force 重筛全部更省 token，也不会翻旧账）
-        new_ids = [j.get("job_id") for j in (scrape_res.get("jobs") or []) if j.get("job_id")]
-        triage_res = start_triage(TriageReq(model_id=req.model_id,
-                                            job_ids=new_ids or None))
-        if not triage_res.get("ok"):
-            _batch["errors"].append(f"粗筛失败：{triage_res.get('error') or '未知错误'}，流水线终止")
-            return
-        if triage_res.get("total", 0) == 0:
-            # 抓取没进新岗（关键词太窄/城市没供给）——不是粗筛的错
-            _batch["errors"].append(
-                "没有需要粗筛的岗位（本次抓取无新增），流水线结束")
-            return
-        kept = triage_res.get("kept", 0)
-        if not kept:
-            _batch["errors"].append("粗筛判全部不匹配，没有岗位需要精配，流水线结束")
+        new_jobs = [j for j in (scrape_res.get("jobs") or []) if j.get("job_id")]
+        if not new_jobs:
+            _batch["errors"].append("本次抓取没有新岗位（可能都已入库），流水线结束")
             return
         if _batch["stop"] or _batch_cancel.is_set() or fetch_gate.stopped():
             return
 
-        _progress_update(stage="精配", phase="抓 JD 并分析", avg_sec=_ANALYZE_AVG_SEC)
-        jobs, stats = _analyze_queue(db.list_jobs(), AnalyzeBatchReq(limit=req.jd_limit))
-        if not jobs:
+        # 新岗位逐个抓 JD（_batch_run 的循环体自带：缓存直读/三层降级/连续失败熔断/
+        # 每岗 checkpoint——正是「抓 JD 不分析」想要的，直接复用）
+        _progress_update(stage="抓JD", phase="逐个抓取 JD 正文", total=len(new_jobs),
+                         done=0, ok=0, failed=0, avg_sec=_ANALYZE_AVG_SEC)
+        _batch["total"] = len(new_jobs)
+        _batch["done"] = 0
+        _batch["ok"] = 0
+        _batch["failed"] = 0
+        # 临时替换分析步：_batch_run 循环体里 JD 抓完即调 analyze_match；
+        # 抓 JD 段只想要 JD。不复用循环体，改用精简循环（JD 缓存直读 + 降级都走 _fetch_jd_core）
+        for j in new_jobs:
+            if _batch["stop"] or _batch_cancel.is_set():
+                break
+            try:
+                fetch_gate.checkpoint()
+            except fetch_gate.Stopped:
+                break
+            _batch["current"] = f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}"
+            _progress_update(current=_batch["current"], phase="抓取 JD 正文")
+            jd_res = _fetch_jd_core(j, refresh=False, cancel=_batch_cancel)
+            if jd_res.get("ok"):
+                _batch["ok"] += 1
+            else:
+                if _batch_cancel.is_set() or fetch_gate.stopped():
+                    break
+                _batch["failed"] += 1
+                if len(_batch["errors"]) < 20:
+                    _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {jd_res.get('error') or 'JD 抓取失败'}"[:160])
+            _batch["done"] += 1
+            _progress_update(done=_batch["done"], ok=_batch["ok"], failed=_batch["failed"])
+
+        jd_failed = _batch["failed"]
+        if _batch["stop"] or _batch_cancel.is_set() or fetch_gate.stopped():
             _batch["errors"].append(
-                "精配队列为空（粗筛结果可能已被分析过），流水线结束")
+                f"抓 JD 阶段被停止（成功 {_batch['ok']}，失败 {jd_failed}），已完成部分保留，不进入分析")
             return
-        _batch["total"] = len(jobs)
-        _progress_update(total=len(jobs), done=0, ok=0, failed=0)
-        stopped, last_err = _batch_run(jobs, cfg, _batch_cancel)
-        if stopped:
-            _batch["errors"].append("精配阶段被停止，已完成岗位已保留")
+
+        # 一次性 AI 分析：本次新岗位里所有拿到 JD 的（分析几乎免费，全部一起做）
+        fresh = [db.get_job("boss", j["job_id"]) or j for j in new_jobs]
+        todo = [j for j in fresh if (j.get("jd_text") or "").strip()]
+        if not todo:
+            _batch["errors"].append("新岗位没有一个 JD 抓取成功，无法分析")
+            return
+        _progress_update(stage="分析", phase="AI 逐岗匹配分析", total=len(todo),
+                         done=0, ok=0, failed=0)
+        _batch["total"] = len(todo)
+        _batch["done"] = 0
+        _batch["ok"] = 0
+        _batch["failed"] = 0
+        for j in todo:
+            if _batch["stop"] or _batch_cancel.is_set():
+                break
+            _batch["current"] = f"{(j.get('title') or '')[:30]} · {(j.get('company') or '')[:16]}"
+            _progress_update(current=_batch["current"], phase="AI 匹配分析")
+            try:
+                analysis = llm.analyze_match(cfg, (db.get_profile() or {}).get("data") or {}, j)
+                db.save_job_analysis(j["platform"], j["job_id"], analysis)
+                _batch["ok"] += 1
+            except Exception as e:
+                _batch["failed"] += 1
+                if len(_batch["errors"]) < 20:
+                    _batch["errors"].append(f"{(j.get('title') or '')[:24]}: {e}"[:160])
+            _batch["done"] += 1
+            _progress_update(done=_batch["done"], ok=_batch["ok"], failed=_batch["failed"])
+        if jd_failed:
+            _batch["errors"].append(f"注意：{jd_failed} 个岗位 JD 抓取失败，已跳过分析")
     except fetch_gate.Stopped as e:
         _batch["errors"].append(f"流水线被停止：{e}")
     except Exception as e:
@@ -927,13 +965,12 @@ def _pipeline_worker(req: PipelineReq, cfg: Dict):
 
 @app.post("/api/pipeline")
 def start_pipeline(req: PipelineReq):
-    """一键流水线：抓取（吃键鼠/风控）→ 粗筛（纯 token）→ JD 精配（限额）。
+    """一键智能抓取（简化版，2026-10-08 用户裁定）：抓列表 → 本次新岗位逐个
+    抓 JD → 一次性 AI 分析。不再有粗筛/精配两级与限额——以 JD 额度换流程简单。
     预检在端点内做完（LLM 可用、原生通道就绪、有简历、无冲突任务在跑），
     worker 开后台线程；进度复用 _batch 状态与悬浮窗，停止复用现有端点。"""
     if _batch["running"]:
-        return {"ok": False, "error": "已有批量精配/流水线在跑，等它结束再开始流水线"}
-    if _triage_lock.locked():
-        return {"ok": False, "error": "已有智能粗筛在跑，等它结束再开始流水线"}
+        return {"ok": False, "error": "已有批量任务/流水线在跑，等它结束再开始"}
     if _pipeline_lock.locked():
         return {"ok": False, "error": "已有流水线在跑"}
     pdata = (db.get_profile() or {}).get("data") or {}
@@ -961,7 +998,7 @@ def start_pipeline(req: PipelineReq):
     _progress_start("一键流水线", "抓取岗位列表", total=1)
     req.resume_text = resume_text
     threading.Thread(target=_pipeline_worker, args=(req, cfg), daemon=True).start()
-    return {"ok": True, "started": True, "jd_limit": req.jd_limit}
+    return {"ok": True, "started": True}
 
 
 # ---------- 抓取进度（悬浮窗数据源）：岗位列表抓取 + 批量分析统一视图 ----------

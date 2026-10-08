@@ -1231,8 +1231,6 @@
         <div class="view-header">
           <div class="view-title">岗位市场 <small id="jobsSubtitle">已缓存 <span id="jobsCount">0</span> 个岗位 · 按 last_seen 倒序</small></div>
           <div class="view-actions">
-            <button class="btn" id="triageBtn" title="智能粗筛（L1）：只把岗位列表里的标题/公司/城市/薪资/经验等结构化字段打包给 AI，批量判「值不值得精配」。几秒到几十秒，不抓 JD、不动键鼠、不吃 BOSS 风控；判为不匹配的岗位不会进入右边的精配队列"><svg class="i"><use href="#i-funnel"/></svg>智能粗筛</button>
-            <button class="btn" id="batchAnalyzeBtn" title="JD 精配（L2）：逐个抓取 JD 全文并让 AI 通读打分，只为「智能粗筛」判保留的岗位花钱。每个约 30~50 秒，期间接管键鼠、吃 BOSS 风控"><svg class="i"><use href="#i-cpu"/></svg>JD 精配</button>
             <button class="btn ghost" id="refreshJobsBtn"><svg class="i"><use href="#i-refresh"/></svg>刷新</button>
           </div>
         </div>
@@ -1256,7 +1254,7 @@
           <label class="checkline" title="非期望城市的岗位（09-22/09-25 两批按全国抓的残留）默认不进列表与抓取/分析队列；取消勾选可看全部">
             <input type="checkbox" id="onlyExpectedCity" checked>只看期望城市
           </label>
-          <span id="batchChip" class="batch-chip" style="display:none" title="点击停止JD 精配"></span>
+          <span id="batchChip" class="batch-chip" style="display:none" title="点击停止当前任务"></span>
         </div>
         <div class="job-list" id="jobList">
           <div class="empty span-all">
@@ -1385,17 +1383,13 @@
         <label class="field-label" for="scrapePage">页码</label>
         <input id="scrapePage" class="input" type="number" min="1" value="1">
       </div>
-      <div class="field field--narrow">
-        <label class="field-label" for="pipelineLimit">精配上限</label>
-        <input id="pipelineLimit" class="input" type="number" min="1" max="50" value="10" title="一键流水线中 JD 精配的数量上限：抓取+粗筛完成后，最多精配这么多岗位的 JD（每个约 30~50 秒键鼠操作）；超出的粗筛保留岗留待下次手动精配">
-      </div>
       <div class="field field--wide">
         <label class="field-label" for="scrapeQuery">关键词</label>
         <div class="input-group">
           <input id="scrapeQuery" class="input" placeholder="留空 = 自动按简历解析意向岗位/技能；可输入任意词开新供给，如「Go 后端」「Grafana」">
-          <button class="btn" id="pipelineBtn" title="一键流水线：抓取岗位列表 → AI 智能粗筛 → 对粗筛保留的岗位逐个抓 JD 精配（受上方「精配上限」约束）。全程自动，期间接管键鼠，可随时暂停/停止"><svg class="i"><use href="#i-layers"/></svg>抓取并精配</button>
-          <button class="btn primary" id="scrapeBtn"><svg class="i"><use href="#i-search"/></svg>开始智能抓取</button>
+          <button class="btn primary" id="scrapeBtn" title="一键智能抓取：抓岗位列表 → 为本次新岗位逐个抓取 JD（已有缓存的跳过）→ 全部到手后一次性 AI 匹配分析。全程自动，期间接管键鼠，可随时暂停/停止"><svg class="i"><use href="#i-layers"/></svg>开始智能抓取</button>
         </div>
+        <div class="fineprint">一次点击全自动：抓列表（约 1 分钟/城）→ 新岗位逐个抓 JD（约 30~50 秒/个）→ AI 一次性分析。可在岗位市场随时暂停/停止，已完成部分保留</div>
       </div>
       <div class="panel extract-panel" id="extractPanel">
         <div class="block-label">本次抓取解析结果</div>
@@ -1670,12 +1664,7 @@ function _renderJdStats(){
     <span class="jd-pill missing ${_jdFilter==='missing'?'active':''}" data-jd-filter="missing" title="点击只看未获取 JD 的岗位；点开岗位卡片后按「抓取 JD 全文」获取">${ICO('x','i--12')} 未获取 <b>${s.without_jd}</b></span>
     <span class="jd-stats-label" title="已获取 JD 的岗位占比">覆盖率 ${s.coverage}%</span>
     ${s.thin?`<span class="jd-pill thin ${_jdFilter==='thin'?'active':''}" data-jd-filter="thin" title="JD 正文短于 ${JD_THIN_LEN} 字且未经人工确认：打开卡片可确认完整或重新抓取">${ICO('alert','i--12')} 疑似残缺 <b>${s.thin}</b></span>`:''}
-    <span class="jd-stats-sep"></span>
-    <span class="jd-stats-label">粗筛</span>
-    <span class="jd-pill tri-keep-pill ${_triFilter==='keep'?'active':''}" data-tri-filter="keep" title="点击只看智能粗筛判「值得精配」的岗位">${ICO('check','i--12')} 留 <b>${t.keep}</b></span>
-    <span class="jd-pill tri-drop-pill ${_triFilter==='drop'?'active':''}" data-tri-filter="drop" title="点击只看粗筛判不匹配的岗位（列表里压暗显示）">${ICO('x','i--12')} 走 <b>${t.drop}</b></span>
-    ${t.none?`<span class="jd-pill tri-none-pill ${_triFilter==='none'?'active':''}" data-tri-filter="none" title="点击只看还没跑粗筛的岗位；先点顶部「智能粗筛」">${ICO('clock','i--12')} 未筛 <b>${t.none}</b></span>`:''}
-    ${(_jdFilter||_triFilter)?`<span class="jd-pill-clear" id="jdFilterClear" title="清除全部筛选（JD / 粗筛 / 状态）">${ICO('x','i--12')} 清除筛选</span>`:''}
+    ${(_jdFilter||_triFilter)?`<span class="jd-pill-clear" id="jdFilterClear" title="清除全部筛选（JD / 状态）">${ICO('x','i--12')} 清除筛选</span>`:''}
   `;
   box.querySelectorAll('[data-jd-filter]').forEach(el=>{
     el.addEventListener('click',()=>{
@@ -1704,9 +1693,7 @@ function _triCounts(jobs){
   return c;
 }
 function _triBadge(j){
-  if(j.triage_keep===1)return `<span class="chip chip--ok" title="智能粗筛（L1）：值得精配">${ICO('check','i--12')}留</span>`;
-  if(j.triage_keep===0)return `<span class="chip chip--danger" title="${_escHtml(j.triage_reason||'智能粗筛：判为不匹配')}">${ICO('x','i--12')}走</span>`;
-  return `<span class="chip chip--dashed" title="还没跑智能粗筛。JD 精配队列会拦住未粗筛的岗位——先点顶部「智能粗筛」，它不抓 JD、不动键鼠">未粗筛</span>`;
+  return '';   // 粗筛已并入一键抓取主线（2026-10-08 用户裁定），历史粗筛结论不再展示
 }
 function _jobEmpty(title,hint,linkText){
   return `<div class="empty span-all">
@@ -1774,8 +1761,8 @@ function _renderJobList(jobs,q){
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span class="num">${_hl(j.salary,q)||'面议'}</span>
-        <span class="score-cluster" title="初筛 ${j.match_score||0}＝本地规则按技能/意向/薪资/城市粗算${j.llm_analysis&&j.llm_analysis.score!=null?`；JD 精配 ${j.llm_analysis.score}＝AI 通读 JD 后结合标签/薪资/城市评分`:''}">
-          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="chip chip--ai" title="JD 精配分（AI 通读 JD 后打分）">AI ${j.llm_analysis.score}</span>`:''}
+        <span class="score-cluster" title="初筛 ${j.match_score||0}＝本地规则按技能/意向/薪资/城市粗算${j.llm_analysis&&j.llm_analysis.score!=null?`；AI 分析 ${j.llm_analysis.score}＝AI 通读 JD 后结合标签/薪资/城市评分`:''}">
+          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="chip chip--ai" title="AI 分析分（AI 通读 JD 后打分）">AI ${j.llm_analysis.score}</span>`:''}
         </span>
       </div>
       ${(j.tags||[]).length?`<div class="job-tags">${(j.tags||[]).slice(0,3).map(t=>`<span class="tag">${_hl(t,q)}</span>`).join('')}</div>`:''}
@@ -2640,84 +2627,7 @@ document.getElementById('polishApplyBtn').addEventListener('click',async()=>{
   }catch(e){showToast('保存失败',e.message);}
 });
 
-// ===== 岗位市场：智能粗筛（L1）——结构化字段批量判 keep/drop，同步返回汇总 =====
-let _triageRunning=false;
-let _triagePoll=null;
-// 进度轮询（B1）：按钮实时显示第几批；页面刷新后靠 /api/triage/status 恢复显示，
-// 服务端并发锁保证就算前端状态丢了，重复起跑也只会得到 busy
-function _pollTriage(){
-  if(_triagePoll)clearInterval(_triagePoll);
-  const btn=document.getElementById('triageBtn');
-  _triagePoll=setInterval(async()=>{
-    try{
-      const s=await(await fetch('/api/triage/status')).json();
-      if(s.running){
-        btn.disabled=true;
-        btn.innerHTML=`${ICO('funnel','spin')}粗筛中 ${s.done||0}/${s.total||'?'} 批…`;
-      }else{
-        clearInterval(_triagePoll);_triagePoll=null;
-        if(!_triageRunning){btn.disabled=false;btn.innerHTML=ICO('funnel')+'智能粗筛';loadJobs();}
-      }
-    }catch(e){}
-  },2000);
-}
-(async()=>{   // 进入页面先问一次：是否已有粗筛在跑（刷新丢状态的场景）
-  try{
-    const s=await(await fetch('/api/triage/status')).json();
-    if(s.running)_pollTriage();
-  }catch(e){}
-})();
-document.getElementById('triageBtn').addEventListener('click',async()=>{
-  if(_triageRunning)return;
-  const cfgs=(await _ensureLlmConfigs()).configs||[];
-  if(!cfgs.length){showToast('未配置 AI 模型','点右上角「AI 模型设置」添加模型后再粗筛');return;}
-  // 确认前先预览：让用户知道这一下要花多少岗位、多少批（B1）
-  const pv=await(await fetch('/api/triage/preview')).json().catch(()=>null);
-  if(pv&&!pv.pending){showToast('无需粗筛','没有待筛岗位（已筛过的可在历史结果里人工翻案）');return;}
-  const pvText=pv?`共 ${pv.pending} 个待筛岗位、${pv.chunks} 批交给 AI，几分钟内完成`
-                 :'待筛岗位数未知（预览失败，仍可继续）';
-  if(!confirm(`智能粗筛（L1）：${pvText}。\n只把标题/公司/城市/薪资/经验等结构化字段打包给 AI 判「值不值得精配」——不抓 JD、不动键鼠、不吃 BOSS 风控，只花 token；判为不匹配的岗位之后不会进入「JD 精配」。\n确定开始？`))return;
-  const btn=document.getElementById('triageBtn');
-  _triageRunning=true;btn.disabled=true;btn.innerHTML=`${ICO('funnel','spin')}粗筛中…`;
-  try{
-    const r=await fetch('/api/triage',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-    const d=await r.json();
-    if(d.busy){   // 服务端锁拒绝：另一轮在跑（页面刷新后按钮状态丢失的兜底）
-      showToast('已有粗筛在跑','进度见按钮，结束后列表会自动刷新');
-      _pollTriage();
-      return;
-    }
-    if(!d.ok){showToast('粗筛未成功',d.error||'未知错误');return;}
-    if(!d.total){showToast('无需粗筛',d.message||'没有待筛岗位');return;}
-    showToast(`粗筛完成：留 ${d.kept} · 走 ${d.dropped}`,
-      `${d.total} 个岗位分 ${d.chunks} 批（模型 ${d.model||'-'}）`
-      +(d.unanswered?`；${d.unanswered} 个 AI 未给结论，按保留处理`:'')
-      +(d.skipped_other_city?`；${d.skipped_other_city} 个异地岗未参与`:''));
-    loadJobs();
-  }catch(e){showToast('粗筛请求失败',e.message);}
-  finally{_triageRunning=false;btn.disabled=false;btn.innerHTML=ICO('funnel')+'智能粗筛';}
-});
-
-// ===== 岗位市场：批量 JD 精配（抓 JD + 分析，后台线程 + 轮询进度） =====
-let _batchTimer=null;
-document.getElementById('batchAnalyzeBtn').addEventListener('click',async()=>{
-  const cfgs=(await _ensureLlmConfigs()).configs||[];
-  if(!cfgs.length){showToast('未配置 AI 模型','点右上角「AI 模型设置」添加模型后再JD 精配');return;}
-  showToast('正在检查原生通道…','确认桌面 Chrome 已打开并登录 zhipin.com');
-  const ns=await(await fetch('/api/native/status')).json().catch(()=>null);
-  if(!ns||!ns.chrome_found||!ns.chrome_ready){
-    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化），再JD 精配');return;
-  }
-  if(!confirm('JD 精配（L2）：逐个抓取 JD 全文并让 AI 通读打分。\n只跑「智能粗筛」判保留的岗位——判为不匹配、以及还没粗筛过的岗位不会花这次抓取（先点左边的「智能粗筛」）。\n每个约 30~50 秒，期间会接管键鼠操作 Chrome，请不要动鼠标键盘；连续 3 个失败会自动停止。确定开始？'))return;
-  try{
-    const r=await fetch('/api/analyze-batch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
-    const d=await r.json();
-    if(!d.ok){showToast('无法开始',d.error||'未知错误');return;}
-    if(d.started===false){showToast('无需精配',d.message||'所有岗位都已有分析结果');return;}
-    showToast('JD 精配已开始',`共 ${d.total} 个岗位，可切到别的页面，进度见岗位市场顶部`);
-    _pollBatch();
-  }catch(e){showToast('启动失败',e.message);}
-});
+// ===== 岗位市场：批量进度条（一键抓取/批量任务共用，后台线程 + 轮询） =====
 function _pollBatch(){
   if(_batchTimer)clearInterval(_batchTimer);
   const chip=document.getElementById('batchChip');
@@ -2739,8 +2649,8 @@ function _pollBatch(){
         :`${ICO('check','i--12')}${s.pipeline?'流水线':'批量精配'}完成：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}${s.errors&&s.errors.length?` · ${_escHtml(s.errors[s.errors.length-1]).slice(0,60)}`:''}<b class="chip-act">收起</b>`;
       if(!s.running){
         clearInterval(_batchTimer);_batchTimer=null;
-        if(stopping)showToast('JD 精配已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
-        else showToast('JD 精配完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
+        if(stopping)showToast('任务已停止',`停止前完成 ${s.done} 个：成功 ${s.ok}${s.failed?` · 失败 ${s.failed}`:''}`);
+        else showToast('任务完成',`成功 ${s.ok}${s.failed?`，失败 ${s.failed}（悬停进度条看原因）`:''}`);
         loadJobs();
       }
     }catch(e){}
@@ -2750,7 +2660,7 @@ document.getElementById('batchChip').addEventListener('click',async()=>{
   const chip=document.getElementById('batchChip');
   if(chip.dataset.running==='1'){
     const isPipeline=chip.dataset.pipeline==='1';
-    if(!confirm(isPipeline?'停止流水线？当前阶段跑完即停，已完成的部分全部保留。':'停止JD 精配？已完成的部分会保留。'))return;
+    if(!confirm('停止当前任务？当前阶段跑完即停，已完成的部分全部保留。'))return;
     chip.innerHTML=`${ICO('stop','i--12')}停止中…`;
     try{
       const d=await(await fetch('/api/analyze-batch/stop',{method:'POST'})).json();
@@ -2981,85 +2891,43 @@ function renderScrapeError(msg,hint,showRetry){
 }
 
 document.getElementById('scrapeBtn').addEventListener('click',async()=>{
-  const resume=document.getElementById('resumeInput').value.trim()||((currentProfile&&currentProfile.data&&currentProfile.data.resume_text)||'');
-  if(!resume){showToast('还没有简历内容','先粘贴简历文本，或在「上传简历 · 解析比对」中采纳资料');return;}
+  // 一键智能抓取（简化版主线）：抓列表 → 新岗逐个抓 JD → 一次性 AI 分析。
+  // 前端只做轻预检与确认，真正预检在 /api/pipeline 端点内（LLM ping/原生通道/简历）。
+  const cfgs=(await _ensureLlmConfigs()).configs||[];
+  if(!cfgs.length){showToast('未配置 AI 模型','点右上角「AI 模型设置」添加模型后再抓取');return;}
+  const st=await checkNativeStatus();
+  if(!st.chrome_found){
+    renderScrapeError('未找到 Chrome 窗口','请先打开 Chrome 并登录 zhipin.com，然后重试',true);
+    return;
+  }
+  if(!st.chrome_ready){
+    showToast('Chrome 可能已最小化','抓取时会自动恢复窗口并定位 BOSS 页，请勿操作键鼠');
+  }
+  if(!confirm('一键智能抓取（全自动）：\n\n① 抓取岗位列表（约 1 分钟/城）\n② 为本次新岗位逐个抓取 JD（约 30~50 秒/个，30 个新岗约 20~30 分钟）\n③ AI 一次性逐岗匹配分析（免费，几分钟）\n\n期间请勿操作鼠标键盘；可随时在进度条点「停止」（当前岗位完成即停，已完成部分保留）。\n确定开始？'))return;
   const btn=document.getElementById('scrapeBtn');
   const origHTML=btn.innerHTML;
   btn.disabled=true;
-  btn.innerHTML=ICO('cpu','spin')+'正在解析简历并抓取…';
-  document.getElementById('scrapeResults').innerHTML=`<div class="empty"><div class="empty-ico">${ICO('cpu','spin')}</div><div class="empty-title">正在通过浏览器抓取</div><div class="empty-hint">约 15~60 秒，期间请勿操作键鼠</div></div>`;
-
-  let city=document.getElementById('scrapeCity').value||null;
-  if(!city&&currentProfile&&currentProfile.data&&currentProfile.data.city)city=currentProfile.data.city;
-  const page=parseInt(document.getElementById('scrapePage').value)||1;
-
+  btn.innerHTML=ICO('cpu','spin')+'智能抓取进行中…（进度见岗位市场顶部）';
+  document.getElementById('scrapeResults').innerHTML=`<div class="empty"><div class="empty-ico">${ICO('cpu','spin')}</div><div class="empty-title">流水线已启动</div><div class="empty-hint">抓列表 → 抓 JD → AI 分析自动执行；切到「岗位市场」顶部可看进度与停止</div></div>`;
   try{
-    // 原生通道预检：无 Chrome 硬拦；Chrome 在但未确认 BOSS 页（可能最小化）时仍尝试（抓取会自动恢复窗口）
-    const st=await checkNativeStatus();
-    if(!st.chrome_found){
-      renderScrapeError('未找到 Chrome 窗口','请先打开 Chrome 并登录 zhipin.com，然后点「重试」',true);
+    const r=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        query:(document.getElementById('scrapeQuery').value||'').trim()||null,
+        city:document.getElementById('scrapeCity').value||null,
+        page:parseInt(document.getElementById('scrapePage').value)||1})});
+    const d=await r.json();
+    if(!d.ok){
+      renderScrapeError('无法开始：'+(d.error||'未知错误'),'',true);
       return;
     }
-    if(!st.chrome_ready){
-      showToast('Chrome 可能已最小化','抓取时会自动恢复窗口并定位 BOSS 页，请勿操作键鼠');
-    }
-
-    const resp=await fetch('/api/scrape-from-resume',{
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({resume_text:resume,query:(document.getElementById('scrapeQuery').value||'').trim()||null,platform:'boss',city,page,use_mock:false})
-    });
-    const data=await resp.json();
-    lastScrapeData=data;
-    renderExtract(data.keywords);
-    // 用户从悬浮窗点了「结束」：不是失败，明确提示即可
-    if(data.source==='stopped'){
-      renderScrapeError('已按你的要求结束本次抓取','已完成的部分不受影响，已入库岗位仍在「岗位市场」',true);
-      refreshScrapeHistory();
-      return;
-    }
-    // 风控/未登录时显示重试按钮
-    if(data.source==='error'&&!data.jobs.length){
-      renderScrapeError('抓取失败：'+(data.error||''),'请确认 Chrome 已打开并登录 zhipin.com；多次失败可能是被风控，稍后再试',true);
-      return;
-    }
-    renderScrapeResults(data);
-    refreshScrapeHistory();
+    showToast('智能抓取已开始','抓取 → 抓 JD → AI 分析自动执行');
+    _pollBatch();
   }catch(e){
     renderScrapeError('请求失败：'+e.message,'',true);
   }finally{
     btn.disabled=false;
     btn.innerHTML=origHTML;
   }
-});
-
-// --- 一键流水线：抓取 → 粗筛 → JD 精配（限额） ---
-document.getElementById('pipelineBtn').addEventListener('click',async()=>{
-  const cfgs=(await _ensureLlmConfigs()).configs||[];
-  if(!cfgs.length){showToast('未配置 AI 模型','点右上角「AI 模型设置」添加模型后再用流水线');return;}
-  const ns=await(await fetch('/api/native/status')).json().catch(()=>null);
-  if(!ns||!ns.chrome_found||!ns.chrome_ready){
-    showToast('原生通道未就绪','请先打开桌面 Chrome 并登录 zhipin.com（窗口不要最小化）');return;
-  }
-  const jdLimit=parseInt(document.getElementById('pipelineLimit').value)||10;
-  if(!confirm(`一键流水线（三阶段全自动）：\n\n① 抓取岗位列表（接管键鼠 15~60 秒/城）\n② AI 智能粗筛（纯 token，秒级）\n③ JD 精配：最多 ${jdLimit} 个（每个约 30~50 秒键鼠操作）\n\n期间请勿操作鼠标键盘；可随时在进度条点「停止」（当前阶段跑完即停，已完成部分保留）。\n预计总耗时 ${(2+Math.ceil(jdLimit*0.75))} 分钟上下。确定开始？`))return;
-  const btn=document.getElementById('pipelineBtn');
-  const orig=btn.innerHTML;
-  btn.disabled=true;btn.innerHTML=ICO('clock','spin')+'流水线启动中…';
-  try{
-    const r=await fetch('/api/pipeline',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        query:(document.getElementById('scrapeQuery').value||'').trim()||null,
-        city:document.getElementById('scrapeCity').value||null,
-        page:parseInt(document.getElementById('scrapePage').value)||1,
-        jd_limit:jdLimit})});
-    const d=await r.json();
-    if(!d.ok){showToast('无法开始流水线',d.error||'未知错误');return;}
-    showToast('流水线已开始','抓取 → 粗筛 → 精配自动执行，进度见岗位市场顶部');
-    switchScrapeTab('results');
-    _pollBatch();
-  }catch(e){showToast('启动失败',e.message);}
-  finally{btn.disabled=false;btn.innerHTML=orig;}
 });
 
 function renderExtract(kw){
@@ -3569,7 +3437,7 @@ async function _initAnalysis(j){
   if(!cfgs.length){box.style.display='none';return;}
   box.style.display='';
   if(j.llm_analysis){box.innerHTML=_renderAnalysis(j.llm_analysis,j);return;}
-  box.innerHTML=`<div class="ai-box ai-box--busy">${ICO('cpu','spin')}JD 精配中…（约 10~20 秒）</div>`;
+  box.innerHTML=`<div class="ai-box ai-box--busy">${ICO('cpu','spin')}AI 分析中…（约 10~20 秒）</div>`;
   await _runAnalysis(j,false,box);
 }
 async function _runAnalysis(j,refresh,box){
@@ -3582,7 +3450,7 @@ async function _runAnalysis(j,refresh,box){
     if(!d.ok)throw new Error(d.error||'精配失败');
     box.innerHTML=_renderAnalysis(d.analysis,j);
   }catch(e){
-    box.innerHTML=`<div class="ai-box ai-box--bad">${ICO('alert','i--12')}<span>JD 精配失败：${_escHtml(e.message)}</span><span class="empty-link" onclick="_initAnalysis({llm_analysis:null})">重试</span></div>`;
+    box.innerHTML=`<div class="ai-box ai-box--bad">${ICO('alert','i--12')}<span>AI 分析失败：${_escHtml(e.message)}</span><span class="empty-link" onclick="_initAnalysis({llm_analysis:null})">重试</span></div>`;
   }
 }
 function _renderAnalysis(a,j){
@@ -3590,7 +3458,7 @@ function _renderAnalysis(a,j){
   const lis=(arr,mod,ico)=>`<div class="ai-list">${arr.map(t=>`<div class="ai-row ai-row--${mod}">${ICO(ico)}<span>${_escHtml(t)}</span></div>`).join('')}</div>`;
   return `<div class="ai-card">
     <div class="ai-head">
-      <div class="ai-score ai-score--${tone}">${a.score}<small> JD 精配（AI）</small></div>
+      <div class="ai-score ai-score--${tone}">${a.score}<small> AI 分析</small></div>
       <div class="ai-verdict">${_escHtml(a.verdict)}</div>
       <span class="ai-re" onclick="_runAnalysis(null,true)">重新精配</span>
     </div>
@@ -3689,7 +3557,7 @@ function renderJobDetailModal(j){
     ${j.match_score?`
       <div class="scorecard">
         <div class="ai-score ai-score--brand">${j.match_score}<small> 标签初筛</small></div>
-        <span class="chip chip--soft" title="本地规则粗算，非 AI 结论；AI 通读 JD 后的「JD 精配」分见下方分析卡">≠ AI 结论</span>
+        <span class="chip chip--soft" title="本地规则粗算，非 AI 结论；AI 通读 JD 后的分析分见下方分析卡">≠ AI 结论</span>
         ${renderMiniBars(j.score_detail)}
         <div class="scorecard-dims">${dimRow}</div>
       </div>
