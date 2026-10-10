@@ -55,6 +55,11 @@ JD_TAILS = ("看了该职位的还看了", "看了该职位的人还看了", "�
             "工作地址", "查看更多信息", "求职工具", "升级VIP", "热门职位",
             "与BOSS随时沟通", "去App", "前往App",
             "公司介绍", "福利待遇", "工商信息", "竞争力分析")  # JD 正文后的天然板块边界（与 fetch_jd.clean_jd 哨兵对齐：JD 只留正文）
+# BOSS 把 JD 写成多小节时会出现的标题（招聘者手写的分段），与 JD_HEADS 合并使用
+JD_SEC_HEADS = JD_HEADS + ("职位职责", "工作内容", "任职要求", "任职条件",
+                           "职位要求", "任职资格", "加分项")
+_JD_SEC_WINDOW = 200     # 标题后多少字内还出现 JD 小节标题，就认为它仍在 JD 正文之内
+_JD_MAX_SKIP = 6         # 同一个标题最多跳过几次，防止异常文本无限往后翻
 MAX_JD_LEN = 20000
 SID_RE = re.compile(r'"securityId"\s*:\s*"([^"]+)"')
 LID_RE = re.compile(r'"lid"\s*:\s*"([^"]+)"')
@@ -225,11 +230,37 @@ def _page_text_uia(w) -> str:
     return best
 
 
+def _is_mid_jd_section(t: str, idx: int, marker: str) -> bool:
+    """idx 处的板块标题是 JD 内部小节，还是页面收尾的卡片？
+
+    BOSS 有些岗位把 JD 写成「职位描述 → 技能标签 → 公司介绍（招聘者写的一段）→ 岗位职责
+    → 任职要求」——公司介绍在这里是正文的一部分，不是页尾那张公司卡片（实测：
+    「AI前端工程师 · 深圳市易京科技」正是这个结构，其余 169 个岗不是，所以只有它一直失败）。
+    判据：紧跟其后还有真正的 JD 小节标题 → 内部小节。标题必须独占一行，避免公司卡片正文里
+    一句「岗位职责描述」把它骗过去。"""
+    if idx < 0:
+        return False
+    after = t[idx + len(marker): idx + len(marker) + _JD_SEC_WINDOW]
+    return any(("\n" + h) in after for h in JD_SEC_HEADS if h != marker)
+
+
+def _next_boundary(t: str, marker: str, start: int) -> int:
+    """从 start 起找 marker 的下一次「真边界」出现，跳过被判定为 JD 内部小节的那些
+    （BOSS 会把「公司介绍」既写进 JD、又放在页尾卡片）；找不到返回 -1。"""
+    i = t.find(marker, start)
+    for _ in range(_JD_MAX_SKIP):
+        if not _is_mid_jd_section(t, i, marker):
+            return i
+        i = t.find(marker, i + len(marker))
+    return i
+
+
 def _jd_body_plausible(txt: str) -> bool:
     """TextPattern 文本里 JD 标题之后是否有实质正文。
     BOSS 详情页正文是 content-visibility 懒渲染：渲染未就绪时「职位描述」标题后
     直接是页尾「公司介绍」段——此时标题存在但正文为空，不能采纳，应回退剪贴板
-    通道或等待后重试（实测坏样本：488 字纯公司介绍被整段当 JD 缓存）。"""
+    通道或等待后重试（实测坏样本：488 字纯公司介绍被整段当 JD 缓存）。
+    注意区分上面那种「公司介绍写在 JD 内部」的正常页面，见 `_is_mid_jd_section`。"""
     t = (txt or "").replace("\r", "")
     pos = -1
     for h in JD_HEADS:
@@ -238,7 +269,7 @@ def _jd_body_plausible(txt: str) -> bool:
             pos = i
     if pos < 0:
         return False
-    tail = t.find("公司介绍", pos)
+    tail = _next_boundary(t, "公司介绍", pos)
     body = t[pos:tail if tail != -1 else len(t)]
     return len(body.replace("\n", "").replace(" ", "").strip()) >= 80
 
@@ -254,7 +285,8 @@ def _grab_page_text(w) -> str:
 
 
 def extract_jd(page_text: str) -> str:
-    """从整页文本里截「职位描述」段：起点取最早的节标题，终点取其后最早的下节标记。"""
+    """从整页文本里截「职位描述」段：起点取最早的节标题，终点取其后最早的下节标记。
+    标记会跳过 JD 内部小节（见 `_is_mid_jd_section`），否则会只截到几个技能标签。"""
     t = (page_text or "").replace("\r", "")
     pos = -1
     for h in JD_HEADS:
@@ -266,7 +298,7 @@ def extract_jd(page_text: str) -> str:
     body = t[pos + 4:]
     cut = len(body)
     for tail in JD_TAILS:
-        i = body.find(tail)
+        i = _next_boundary(body, tail, 0)
         if i != -1:
             cut = min(cut, i)
     lines = [ln.strip() for ln in body[:cut].split("\n")]
@@ -476,6 +508,65 @@ def _page_ok(win_title: str, title: str, company: str) -> bool:
     return bool(key) and key in re.sub(r"\s+", "", t)
 
 
+_JD_POLL_TRIES = 8           # 懒渲染补救轮询次数：8 × ~1s ≈ 8 秒，远小于子进程 150s 超时
+_JD_POLL_GAP = (0.8, 1.4)
+
+
+def _grab_jd_after_render(w, land_title: str, title: str, company: str):
+    """在已落地的详情页上取一次正文并截 JD；截不到就在**同一个页面**上继续等渲染。
+
+    快路径与旧代码逐字一致：同样的 1.2~2.2 秒抖动 → 同一次 `_grab_page_text` →
+    同一句 `extract_jd`。本来就能抓到 JD 的岗位不多读一次页面、不多花一秒。
+
+    只有第一次没截到才追加轮询——BOSS 详情页正文是 content-visibility 懒渲染
+    （见 `_jd_body_plausible`），旧代码在这里只回退一次剪贴板通道就放弃，而详情页
+    主内容区 Ctrl+A 本来就选不中（见 `_page_text_uia`），那条回退等于空转。
+
+    落地页标题过不了 `_page_ok` 时**不轮询**：那压根不是详情页，在它身上等渲染是
+    白等，直接让调用方降级到下一条路径。轮询只走 UIA（零输入事件、不碰剪贴板），
+    采纳标准仍是现成的 `_jd_body_plausible` + `extract_jd` ≥20 字，不因等待而放宽。
+    返回 (jd, 用于报错的正文样本)——样本取整轮里读到内容最长的那一次：窗口刚切换或
+    UIA 枚举抖动时某一次会读到空串，拿它当「正文样本」报出去等于没报。
+    """
+    time.sleep(random.uniform(1.2, 2.2))
+    txt = _grab_page_text(w)
+    seen = txt
+    if not _page_ok(land_title, title, company):
+        return "", txt
+    jd = extract_jd(txt)
+    if len(jd.strip()) >= 20:
+        return jd, txt
+    for _ in range(_JD_POLL_TRIES):
+        # 安全点：补救轮询最坏 ~9 秒，期间用户按「停止」要能马上认下来
+        # （等待本身只有 UIA 读页，不注入键鼠，故 checkpoint 落在两次读页之间）
+        fetch_gate.checkpoint()
+        time.sleep(random.uniform(*_JD_POLL_GAP))
+        txt = _page_text_uia(w)
+        if len(txt) > len(seen):
+            seen = txt
+        if not (any(h in txt for h in JD_HEADS) and _jd_body_plausible(txt)):
+            continue
+        jd = extract_jd(txt)
+        if len(jd.strip()) >= 20:
+            return jd, txt
+    return "", seen
+
+
+def _landing_evidence(land_title: str, land_text: str) -> str:
+    """彻底失败时把「到底落在哪、页面上有什么」塞进报错。
+
+    「未解析到职位描述」这一句同时容纳两种完全不同的病：懒渲染没等到、和被弹到一个
+    标题含职位名的搜索/聚合页（`_page_ok` 只看标题，而 BOSS 搜索页标题天然含职位名
+    前 8 字，两支判据都会放过它）。分不清就只能反复重试。整段包 try：诊断不许盖掉
+    真错误，更不许自己抛异常。"""
+    try:
+        t = (land_title or "").strip()[:60] or "（空）"
+        s = re.sub(r"\s+", " ", (land_text or "")).strip()[:120] or "（空）"
+        return f"；落地页标题「{t}」；正文样本「{s}」"
+    except Exception:
+        return ""
+
+
 def _reuse_existing_detail_tab(w, title: str, company: str):
     """浏览器里已开着目标岗位的详情 tab（上次抓取遗留或用户手动打开）时直接
     切过去复用，省掉 job_detail/搜索两次导航——请求足迹最小。配对优先公司名：
@@ -648,6 +739,7 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
         throttle_wait()
         w = find_zhipin_tab()
         jd = ""
+        land_title = land_text = ""    # 最后一次导航落到了哪、读到什么，失败时报给用户
         detail_url = (job_url or "").strip() or f"https://www.zhipin.com/job_detail/{job_id}.html"
         jid = job_id or ""
         if not jid:
@@ -668,10 +760,8 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
             _goto(detail_url)
             t1 = _wait_title(w, old, timeout_s=20)
             if "直聘" in t1 and "about:blank" not in t1:
-                time.sleep(random.uniform(1.2, 2.2))  # 正文懒渲染需要触发时间，取太早会只剩页尾「公司介绍」
-                page_text = _grab_page_text(w)
-                if _page_ok(t1, title, company):
-                    jd = extract_jd(page_text)
+                jd, page_text = _grab_jd_after_render(w, t1, title, company)
+                land_title, land_text = t1, page_text
         if len(jd.strip()) < 20:
             # 安全点：路径 B（搜索页定位 + 中键点击）开始前
             fetch_gate.checkpoint()
@@ -686,11 +776,10 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
             switched = None
             try:
                 switched = _click_search_result(w, title, company)
-                time.sleep(random.uniform(1.2, 2.2))  # 新开详情 tab 的正文懒渲染同样需要时间
-                page_text = _grab_page_text(w)
+                jd, page_text = _grab_jd_after_render(w, switched, title, company)
+                land_title, land_text = switched, page_text
                 if not _page_ok(switched, title, company):
                     raise NativeError("点开的不是目标岗位详情页（标题：%s），可能已下线或被风控" % (switched or "")[:40])
-                jd = extract_jd(page_text)
             finally:
                 if switched is not None:
                     _close_active_tab(w)
@@ -698,7 +787,8 @@ def fetch_jd_native(job_id: str, job_url: str, title: str, company: str) -> dict
             result["ok"] = True
             result["jd"] = jd.strip()[:MAX_JD_LEN]
         else:
-            result["error"] = "原生通道已打开详情页但未解析到职位描述（页面改版或被风控）"
+            result["error"] = ("原生通道已打开详情页但未解析到职位描述（页面改版或被风控）"
+                               + _landing_evidence(land_title, land_text))
     except fetch_gate.Stopped as e:
         result["error"] = str(e)
         result["stopped"] = True        # 让上层跳过 CDP/直连兜底，停止秒级生效
