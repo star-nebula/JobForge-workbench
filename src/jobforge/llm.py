@@ -4,8 +4,8 @@
 支持任意 OpenAI 兼容服务：DeepSeek / 通义 / Moonshot / 智谱 / 硅基流动 /
 OpenRouter / 本地 Ollama 等——base_url 填到 /v1 即可。
 
-功能函数（greeting / analyze_match / polish_resume）与批量粗筛
-（triage_chunk / triage_jobs）都只依赖注入的 config，chat 可在测试中 mock。
+功能函数（greeting / analyze_match / polish_resume）只依赖注入的 config，
+chat 可在测试中 mock。
 """
 import json
 import re
@@ -200,101 +200,3 @@ def polish_resume(config: Dict, pdata: Dict) -> Dict:
         "experience": str(d.get("experience") or "").strip(),
         "model": config.get("model"),
     }
-
-
-# ---------- L1 打包粗筛（triage）：用列表页结构化字段批量判 keep/drop ----------
-TRIAGE_CHUNK = 10
-# 耗时随块大小超线性增长（2026-09-30 真调实测：5 岗 11s、10 岗 42s、20 岗 >90s 直接超时），
-# 默认 90s 的 chat 超时撑不住一块，粗筛单独放宽到 180s 并取 10 岗一块留足余量。
-TRIAGE_TIMEOUT = 180
-
-
-def _as_bool(v: Any) -> bool:
-    """把模型可能给出的 keep 形态（true/false/字符串）归一成布尔。"""
-    if isinstance(v, str):
-        return v.strip().lower() not in ("false", "0", "no", "否", "")
-    return bool(v)
-
-
-def _job_brief_line(no: int, job: Dict) -> str:
-    """一岗一行的粗筛输入。刻意不含 jd_text 与 match_score：前者本阶段就没有，
-    后者喂进去只会让模型照抄本地分，粗筛与初筛的一致性验证随之失效。"""
-    tags = "、".join(str(t).strip() for t in (job.get("tags") or []) if str(t).strip()) or "无"
-    fields = [str(job.get(k) or "未标注").strip()
-              for k in ("title", "company", "salary", "city", "experience", "education")]
-    return f"{no}. {' | '.join(fields)} | 标签: {tags}"
-
-
-def triage_chunk(config: Dict, pdata: Dict, jobs: List[Dict]) -> Dict[int, Dict]:
-    """一次调用粗筛一批岗位（≤TRIAGE_CHUNK 个），返回 {序号: {keep, reason}}。
-
-    序号漏答不在此兜底，由 triage_jobs 统一按保守保留处理。"""
-    brief = _profile_brief(pdata)
-    lines = "\n".join(_job_brief_line(i, j) for i, j in enumerate(jobs, 1))
-    user = (f"【求职者】求职方向 {brief['target_position'] or '未填'}；"
-            f"技能 {('、'.join(brief['skills'][:12])) if brief['skills'] else '未填'}；"
-            f"经历 {brief['experience'] or '未填'}\n"
-            f"【期望】城市 {brief['city'] or '不限'}；薪资 {brief['expected_salary'] or '未填'}\n"
-            f"【候选岗位】（每行格式：标题 | 公司 | 薪资 | 城市 | 经验 | 学历 | 标签。"
-            f"编号仅用于回答）\n{lines}")
-    text = chat(config, [
-        {"role": "system", "content": (
-            "你是求职者的岗位粗筛助手，判断每个岗位值不值得花成本去抓 JD 做精细匹配。"
-            '只输出一个 JSON 对象（不要 markdown 围栏、不要解释）：'
-            '{"jobs":[{"no":1,"keep":true,"reason":"不超过20字的依据"}]}。'
-            "判定口径——召回优先：粗筛的目的是砍掉确定没戏的，不是挑出确定有戏的。"
-            "只有硬信息明确显示不匹配才 keep=false，典型是：岗位性质与求职方向无关"
-            "（如找前端而岗是机械、运维、算法、航空）、城市与期望城市冲突、"
-            "经验或学历门槛远高于求职者现状。"
-            "薪资一律不作为淘汰依据：求职者不设薪资硬下限，低于期望薪资的岗位照样值得精配。"
-            "信息不足、含义模糊、岗位可能跨领域迁移的，一律 keep=true。"
-            "不要因为标题含「高级」「专家」「资深」就判不匹配，职级词不构成门槛依据。"
-            "本阶段没有 JD 正文：reason 只能说依据的那条硬信息，不得臆测或编造岗位要求。"
-            "每个编号都要给出判定，不要遗漏、不要新增。")},
-        {"role": "user", "content": user},
-    ], temperature=0.2, max_tokens=max(400, 80 * len(jobs)), timeout=TRIAGE_TIMEOUT)
-    d = parse_json(text)
-    got: Dict[int, Dict] = {}
-    for item in (d.get("jobs") or []):
-        if not isinstance(item, dict):
-            continue
-        try:
-            no = int(item.get("no"))
-        except (TypeError, ValueError):
-            continue
-        if 1 <= no <= len(jobs):
-            got[no] = {"keep": _as_bool(item.get("keep")),
-                       "reason": str(item.get("reason") or "").strip()[:80]}
-    return got
-
-
-def triage_jobs(config: Dict, pdata: Dict, jobs: List[Dict],
-                chunk_size: int = TRIAGE_CHUNK, progress=None) -> List[Dict]:
-    """按 chunk_size 切块粗筛（每块一次 LLM 调用），返回顺序与入参一致。
-
-    每项 {platform, job_id, keep, reason, answered}；模型漏答的岗位保守 keep=true
-    并置 answered=False，绝不因一次格式不对就丢岗。progress(done, total) 每块回调一次，
-    供上层进度显示；回调抛异常不阻断筛选取向。"""
-    pdata = pdata or {}
-    out: List[Dict] = []
-    total_chunks = -(-len(jobs) // chunk_size) if jobs else 0
-    done = 0
-    for i in range(0, len(jobs), chunk_size):
-        chunk = jobs[i:i + chunk_size]
-        got = triage_chunk(config, pdata, chunk)
-        for no, j in enumerate(chunk, 1):
-            d = got.get(no)
-            out.append({
-                "platform": j.get("platform") or "boss",
-                "job_id": str(j.get("job_id") or ""),
-                "keep": True if d is None else d["keep"],
-                "reason": (d or {}).get("reason") or "模型未给出判定，保守保留",
-                "answered": d is not None,
-            })
-        done += 1
-        if progress:
-            try:
-                progress(done, total_chunks)
-            except Exception:
-                pass
-    return out

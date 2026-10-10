@@ -76,7 +76,8 @@ def init_db():
         # 人工确认 JD 完整（疑似残缺岗位经用户确认后计入「已获取」；重抓落库自动作废）
         if "jd_confirmed" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN jd_confirmed INTEGER DEFAULT 0")
-        # L1 打包粗筛结果：triage_keep 为 NULL 表示尚未粗筛（与 0=判不匹配、1=值得精配三态可分）
+        # L1 粗筛结果列（2026-10-09 粗筛接口下线，列与历史数据按用户裁定保留供复核）：
+        # triage_keep 三态 = NULL 从未筛过 / 0 当时判不匹配 / 1 当时判值得做 AI 分析
         if "triage_keep" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_keep INTEGER")
         if "triage_reason" not in cols:
@@ -84,7 +85,7 @@ def init_db():
         if "triage_at" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN triage_at INTEGER")
         # 粗筛通过即进流水线（2026-10-03）：keep=1 却仍停在 discovered 的岗位一律升入评估列。
-        # 幂等自愈——正常流转下不该存在这种组合，存在即说明是老库残留或手工改回。
+        # 现在只兜老库残留——新的升档入口已由 AI 分析分驱动（见 save_job_analysis）。
         c.execute("UPDATE seen_jobs SET status='reviewing' "
                   "WHERE status='discovered' AND triage_keep=1")
         c.execute("CREATE INDEX IF NOT EXISTS idx_seen_status ON seen_jobs(status)")
@@ -300,26 +301,22 @@ def set_jd_confirmed(platform: str, job_id: str, confirmed: bool = True) -> Opti
         return _row_to_dict(r) if r else None
 
 
-def save_job_analysis(platform: str, job_id: str, analysis: Dict) -> bool:
-    """缓存岗位的 LLM 匹配分析结果（JSON）。"""
+def save_job_analysis(platform: str, job_id: str, analysis: Dict,
+                      review_floor: Optional[float] = None) -> bool:
+    """缓存岗位的 LLM 匹配分析结果（JSON）。
+    review_floor 非空且本次分数达到门槛时，把仍停在 discovered 的岗位升入 reviewing——
+    2026-10-09 L1 粗筛退出主线后，进评估列改由 AI 分析分驱动（旧的「keep=1 自动升档」
+    只剩 init_db 里的一次性 backfill 还在兜历史数据）。只向前不回退：已在流水线更后段
+    （applied/interviewing/终态）的一律不动。"""
+    score = analysis.get("score")
+    promote = (review_floor is not None and isinstance(score, (int, float))
+               and not isinstance(score, bool) and score >= review_floor)
     with _conn() as c:
         cur = c.execute(
-            "UPDATE seen_jobs SET llm_analysis=? WHERE platform=? AND job_id=?",
-            (json.dumps(analysis, ensure_ascii=False), platform, job_id)
-        )
-        return cur.rowcount > 0
-
-
-def save_job_triage(platform: str, job_id: str, keep: bool, reason: str) -> bool:
-    """落 L1 粗筛判定。三态靠 triage_keep 是否为 NULL 区分「没筛过」与「筛了判不匹配」。
-    keep=True 同时把仍停在 discovered 的岗位升入 reviewing（粗筛通过即进投递流水线评估列，
-    2026-10-03 定稿的流转口径）；已在流水线更后段（applied/interviewing/终态）的不动。"""
-    with _conn() as c:
-        cur = c.execute(
-            "UPDATE seen_jobs SET triage_keep=?, triage_reason=?, triage_at=?, "
+            "UPDATE seen_jobs SET llm_analysis=?, "
             "status=CASE WHEN ?=1 AND status='discovered' THEN 'reviewing' ELSE status END "
             "WHERE platform=? AND job_id=?",
-            (1 if keep else 0, reason, int(time.time()), 1 if keep else 0, platform, job_id)
+            (json.dumps(analysis, ensure_ascii=False), 1 if promote else 0, platform, job_id)
         )
         return cur.rowcount > 0
 

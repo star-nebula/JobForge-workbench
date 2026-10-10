@@ -1,15 +1,17 @@
 """server 层纯函数测试：密钥脱敏 + 模型配置选型 + 批量分析预检 + JD 确认端点 + L0 城市门槛
-+ L1 粗筛端点 + L2 精配额度门禁 + restart 三重判定 + 抓取子进程输出分支
++ AI 分析队列门禁 + restart 三重判定 + 抓取子进程输出分支
 （db/llm mock，不碰真实库、绝不触发真实 JD 抓取）。"""
 import subprocess
 import sys
+import threading
+import time
 
 import pytest
 from fastapi import HTTPException
 
 from jobforge import llm, server
-from jobforge.server import (AnalyzeBatchReq, CrawlReq, JdConfirmReq, PipelineReq,
-                             ScrapeFromResumeReq, TriageReq, _get_llm_config, _mask_key)
+from jobforge.server import (AnalyzeBatchReq, AnalyzeReq, CrawlReq, JdConfirmReq, PipelineReq, RetryTarget,
+                             ScrapeFromResumeReq, _get_llm_config, _mask_key)
 
 
 def test_mask_key():
@@ -73,14 +75,39 @@ def test_analyze_batch_preflight_rejects_bad_config(monkeypatch):
 
 
 def test_analyze_batch_preflight_rejects_native_not_ready(monkeypatch):
-    """批量启动前必须原生通道就绪（Chrome 开着 zhipin），否则非缓存岗位全失败（2026-09-27 事故回归）。"""
+    """原生通道预检的适用范围＝「本次真的会去抓 JD」（2026-09-27 事故回归）。
+
+    判据是队列里的 need_jd，不是按钮种类：缺 JD 的岗不真抓就没法分析，通道没就绪就得
+    当场拦下，否则逐个走「原生失败→CDP 兜底被反爬→直连失败」全程白烧；
+    反过来队列里每个岗都已有 JD 时，抓取环节走缓存短路，Chrome 关着照样能跑。
+    """
     monkeypatch.setattr(server, "_get_llm_config",
                         lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
     monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
     monkeypatch.setattr(server, "_native_channel_status",
-                        lambda: {"ok": False, "chrome_found": False, "chrome_ready": False, "error": "未找到 Chrome"})
-    r = server.start_analyze_batch(AnalyzeBatchReq())
+                        lambda: {"ok": False, "chrome_found": False, "chrome_ready": False,
+                                 "error": "未找到 Chrome"})
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    monkeypatch.setattr(server.db, "list_jobs",
+                        lambda status=None: [{"platform": "boss", "job_id": "j1", "city": "上海"}])
+    r = server.start_analyze_batch(AnalyzeBatchReq(retry=[{"platform": "boss", "job_id": "j1"}]))
     assert r["ok"] is False and "原生通道未就绪" in r["error"]
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["ok"] is False and "原生通道未就绪" in r["error"], "缺 JD 的常规批次同样要预检"
+
+    monkeypatch.setattr(server.db, "list_jobs",
+                        lambda status=None: [{"platform": "boss", "job_id": "j1",
+                                              "city": "上海", "jd_text": "正文"}])
+    monkeypatch.setattr(server, "_ensure_hud", lambda: None)
+    monkeypatch.setattr(server, "_progress_start", lambda *a, **k: True)
+    monkeypatch.setattr(server, "_progress_update", lambda **k: None)
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze": None)
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["ok"] is True and r["started"] is True, f"全有 JD 的批次不碰键鼠，不该被 Chrome 拦住：{r}"
+    server._batch.update({"running": False, "stop": False, "total": 0, "done": 0, "ok": 0,
+                          "failed": 0, "current": "", "errors": [], "failed_jobs": [],
+                          "stage": "", "pipeline": False, "note": ""})
 
 
 def test_analyze_batch_no_jobs_no_start(monkeypatch):
@@ -119,91 +146,6 @@ def test_batch_stop_kills_running_procs(monkeypatch):
             server._batch_procs.discard(p)
         server._batch_cancel.clear()
         server._batch.update({"running": False, "stop": False})   # 复位全局态，别污染后续用例
-
-
-# ---------- L1 打包粗筛端点 ----------
-_ROWS = [{"platform": "boss", "job_id": "a", "triage_keep": None},
-         {"platform": "boss", "job_id": "b", "triage_keep": 1},
-         {"platform": "boss", "job_id": "c", "triage_keep": None}]
-
-
-def _stub_triage(monkeypatch, rows=_ROWS, keep=lambda jid: jid != "c"):
-    monkeypatch.setattr(server, "_get_llm_config",
-                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
-    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
-    monkeypatch.setattr(server.db, "list_jobs", lambda status=None: list(rows))
-    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
-    saved = []
-    monkeypatch.setattr(server.db, "save_job_triage",
-                        lambda p, j, k, r: saved.append((j, k, r)))
-    monkeypatch.setattr(server.llm, "triage_jobs",
-                        lambda cfg, pdata, jobs, chunk_size, progress=None: [
-                            {"platform": "boss", "job_id": j["job_id"],
-                             "keep": keep(j["job_id"]), "reason": "r", "answered": True}
-                            for j in jobs])
-    return saved
-
-
-def test_triage_skips_already_triaged(monkeypatch):
-    """缺省只挑 triage_keep 为 NULL 的岗位——「筛过且判不匹配」不能被下一轮又筛一遍。"""
-    saved = _stub_triage(monkeypatch)
-    r = server.start_triage(TriageReq(chunk_size=2))
-    assert [s[0] for s in saved] == ["a", "c"]
-    assert (r["total"], r["kept"], r["dropped"], r["chunks"]) == (2, 1, 1, 1)
-
-
-def test_triage_job_ids_overrides_filter(monkeypatch):
-    """显式 job_ids 用于小样本验收：无视已筛状态，指定谁就筛谁。"""
-    saved = _stub_triage(monkeypatch, keep=lambda jid: True)
-    r = server.start_triage(TriageReq(job_ids=["b"], chunk_size=20))
-    assert [s[0] for s in saved] == ["b"]
-    assert r["ok"] is True and r["total"] == 1
-
-
-def test_triage_limit_and_force(monkeypatch):
-    saved = _stub_triage(monkeypatch)
-    assert server.start_triage(TriageReq(limit=1))["total"] == 1
-    saved.clear()
-    r = server.start_triage(TriageReq(force=True, chunk_size=40))
-    assert sorted(s[0] for s in saved) == ["a", "b", "c"]     # force 连筛过的重筛
-    assert r["chunks"] == 1
-
-
-def test_triage_nothing_to_do(monkeypatch):
-    saved = _stub_triage(monkeypatch, rows=[{"platform": "boss", "job_id": "b", "triage_keep": 0}])
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is True and r["total"] == 0 and saved == []
-
-
-def test_triage_requires_config(monkeypatch):
-    monkeypatch.setattr(server, "_get_llm_config", lambda mid=None: None)
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is False and "尚未配置" in r["error"]
-
-
-def test_triage_ping_failure_blocks_before_scan(monkeypatch):
-    """批量粗筛会打若干次模型调用，配置不可用要当场拦下（同批量分析的教训）。"""
-    monkeypatch.setattr(server, "_get_llm_config",
-                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
-    monkeypatch.setattr(server.llm, "chat",
-                        lambda *a, **k: (_ for _ in ()).throw(llm.LLMError("HTTP 401")))
-    listed = []
-    monkeypatch.setattr(server.db, "list_jobs", lambda status=None: listed.append(1) or [])
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is False and "配置不可用" in r["error"]
-    assert listed == []          # ping 失败就不该去枚举岗位
-
-
-def test_triage_llm_error_does_not_write(monkeypatch):
-    """整块解析失败时抛 LLMError → 端点报错回用户，不得把岗位静默写成 drop。"""
-    saved = _stub_triage(monkeypatch)
-
-    def boom(cfg, pdata, jobs, chunk_size, progress=None):
-        raise llm.LLMError("LLM 未返回 JSON")
-    monkeypatch.setattr(server.llm, "triage_jobs", boom)
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is False and "未返回 JSON" in r["error"]
-    assert saved == []
 
 
 # ---------- L0 城市门槛（2026-09-30 用户裁定 A：异地岗保留数据但不进列表/队列） ----------
@@ -272,25 +214,8 @@ def test_jobs_no_city_gate_without_profile_city(monkeypatch):
     assert len(d["jobs"]) == 1 and d["other_city_count"] == 0
 
 
-def test_triage_skips_other_cities(monkeypatch):
-    rows = [{"platform": "boss", "job_id": "sh", "triage_keep": None, "city": "上海"},
-            {"platform": "boss", "job_id": "bj", "triage_keep": None, "city": "北京"}]
-    saved = _stub_triage(monkeypatch, rows=rows)
-    r = server.start_triage(TriageReq())
-    assert [s[0] for s in saved] == ["sh"]
-    assert r["skipped_other_city"] == 1
-
-
-def test_triage_job_ids_bypass_city_gate(monkeypatch):
-    """显式 job_ids 圈定优先于城市门槛（小样本验收要能指定任意岗）。"""
-    rows = [{"platform": "boss", "job_id": "bj", "triage_keep": None, "city": "北京"}]
-    saved = _stub_triage(monkeypatch, rows=rows)
-    r = server.start_triage(TriageReq(job_ids=["bj"]))
-    assert [s[0] for s in saved] == ["bj"] and r["skipped_other_city"] == 0
-
-
 def test_analyze_batch_skips_other_cities(monkeypatch):
-    """异地岗不进精配队列：全部被门槛滤掉 → 直接不开跑（不开线程、不拉悬浮窗）。"""
+    """异地岗不进 AI 分析队列：全部被门槛滤掉 → 直接不开跑（不开线程、不拉悬浮窗）。"""
     monkeypatch.setattr(server, "_get_llm_config",
                         lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
     monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
@@ -303,58 +228,123 @@ def test_analyze_batch_skips_other_cities(monkeypatch):
     assert r["ok"] is True and r["started"] is False and r["skipped_other_city"] == 1
 
 
-# ---------- L2 精配额度门禁（阶段2：JD 抓取额度只花在 triage_keep=1 的岗上） ----------
-_QROWS = [{"platform": "boss", "job_id": "k1", "city": "上海", "triage_keep": 1},
-          {"platform": "boss", "job_id": "k2", "city": "上海", "triage_keep": 1,
-           "llm_analysis": {"match_score": 9}},
-          {"platform": "boss", "job_id": "d1", "city": "上海", "triage_keep": 0},
-          {"platform": "boss", "job_id": "u1", "city": "上海", "triage_keep": None},
-          {"platform": "boss", "job_id": "bj", "city": "北京", "triage_keep": 1}]
+# ---------- AI 分析队列门禁（2026-10-09：L1 粗筛下线；JD 门同日加了又撤，见下方注释） ----------
+_QROWS = [{"platform": "boss", "job_id": "j1", "city": "上海", "jd_text": "JD 正文"},
+          {"platform": "boss", "job_id": "j2", "city": "上海", "jd_text": "JD 正文",
+           "llm_analysis": {"score": 9}},
+          {"platform": "boss", "job_id": "j3", "city": "上海", "jd_text": "JD 正文",
+           "triage_keep": 0},
+          {"platform": "boss", "job_id": "j4", "city": "上海"},
+          {"platform": "boss", "job_id": "j5", "city": "上海", "llm_analysis": {"score": 3}},
+          {"platform": "boss", "job_id": "bj", "city": "北京", "jd_text": "JD 正文"}]
 
 
 def _ids(rows):
     return [r["job_id"] for r in rows]
 
 
-def test_analyze_queue_gates_by_triage(monkeypatch):
-    """没筛过的岗同样拦下：否则新抓的一批整批绕过门禁，门等于没装。"""
+def test_analyze_queue_gates_only_city_and_analyzed(monkeypatch):
+    """只剩两级闸门，且历史 triage_keep=0 的老岗不再被拦：
+    粗筛门若还留着，这批岗会被判成「尚未粗筛」，手动批量分析直接空转。"""
     monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
     jobs, stats = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq())
-    assert _ids(jobs) == ["k1"]
-    assert stats == {"skipped_other_city": 1, "skipped_dropped": 1,
-                     "skipped_untriaged": 1, "skipped_analyzed": 1}
+    assert _ids(jobs) == ["j1", "j3", "j4"]
+    assert stats == {"skipped_other_city": 1, "skipped_analyzed": 2, "need_jd": 1}
 
 
-def test_analyze_queue_include_dropped_bypasses_triage(monkeypatch):
-    """include_dropped 用于人工复核粗筛：drop 与未筛都放行，但城市门与已分析照旧。"""
+def test_analyze_queue_keeps_jobs_missing_jd(monkeypatch):
+    """缺 JD 的未分析岗必须留在分析队列里（先抓 JD 再分析）。
+
+    2026-10-09 晚曾把缺 JD 的一律挡下，理由是「点分析不等于重抓全库」；代价是
+    智能抓取只抓到列表、JD 没抓到的那批岗在岗位市场再无入口补齐，只能重跑整条流水线
+    （抓列表约 1 分钟/城）。正确口径是如实播报代价（need_jd）而不是砍功能：
+    已有 JD 的岗在抓取环节走缓存短路，不会因为队列里混了缺 JD 的就重复花额度。
+    """
     monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
-    jobs, stats = server._analyze_queue([dict(r) for r in _QROWS],
-                                        AnalyzeBatchReq(include_dropped=True))
-    assert _ids(jobs) == ["k1", "d1", "u1"]
-    assert stats["skipped_dropped"] == 0 and stats["skipped_untriaged"] == 0
-    assert stats["skipped_analyzed"] == 1 and stats["skipped_other_city"] == 1
+    rows = [{"platform": "boss", "job_id": "has_jd", "city": "上海", "jd_text": "正文"},
+            {"platform": "boss", "job_id": "no_jd", "city": "上海"},
+            {"platform": "boss", "job_id": "blank_jd", "city": "上海", "jd_text": "   "},
+            {"platform": "boss", "job_id": "done", "city": "上海", "jd_text": "正文",
+             "llm_analysis": {"score": 7}},
+            {"platform": "boss", "job_id": "done_no_jd", "city": "上海",
+             "llm_analysis": {"score": 2}}]
+    jobs, stats = server._analyze_queue(rows, AnalyzeBatchReq())
+    assert _ids(jobs) == ["has_jd", "no_jd", "blank_jd"], "缺 JD 的未分析岗要进队列"
+    assert stats["need_jd"] == 2, stats
+    assert stats["skipped_analyzed"] == 2, "已有分析结果的（含「已分析但缺 JD」）默认不重做"
+
+
+def test_analyze_queue_force_reincludes_analyzed_jobs(monkeypatch):
+    """force=连已分析的也重做：「已分析但缺 JD」的岗这时才进队列（没正文没法重分析，只能真抓）。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    rows = [{"platform": "boss", "job_id": "has_jd", "city": "上海", "jd_text": "正文"},
+            {"platform": "boss", "job_id": "no_jd", "city": "上海", "llm_analysis": {"score": 1}}]
+    jobs, stats = server._analyze_queue(rows, AnalyzeBatchReq(force=True))
+    assert _ids(jobs) == ["has_jd", "no_jd"]
+    assert stats["need_jd"] == 1, stats
+
+
+def test_analyze_queue_need_jd_counted_after_limit(monkeypatch):
+    """need_jd 要说的是「本次真会抓几个」，limit 截断之后再数，否则确认框里的数字是虚的。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    rows = [{"platform": "boss", "job_id": f"a{n}", "city": "上海"} for n in range(4)]
+    jobs, stats = server._analyze_queue(rows, AnalyzeBatchReq(limit=2))
+    assert len(jobs) == 2 and stats["need_jd"] == 2, stats
 
 
 def test_analyze_queue_force_and_limit(monkeypatch):
-    """force 只放开「已分析」这一轴，不放开粗筛门（两个轴语义不同，不能合一个开关）。"""
     monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    jobs, _ = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq(force=True))
+    assert _ids(jobs) == ["j1", "j2", "j3", "j4", "j5"]
     jobs, _ = server._analyze_queue([dict(r) for r in _QROWS],
-                                    AnalyzeBatchReq(force=True))
-    assert _ids(jobs) == ["k1", "k2"]
-    jobs, _ = server._analyze_queue([dict(r) for r in _QROWS],
-                                    AnalyzeBatchReq(force=True, include_dropped=True))
-    assert _ids(jobs) == ["k1", "k2", "d1", "u1"]
-    jobs, _ = server._analyze_queue([dict(r) for r in _QROWS],
-                                    AnalyzeBatchReq(force=True, include_dropped=True, limit=2))
-    assert _ids(jobs) == ["k1", "k2"]
+                                    AnalyzeBatchReq(force=True, limit=2))
+    assert _ids(jobs) == ["j1", "j2"]
 
 
 def test_analyze_queue_no_city_gate_without_profile_city(monkeypatch):
-    """profile 没填城市 → 不限城市，北京岗照样进队列（但粗筛门照旧生效）。"""
+    """profile 没填城市 → 不限城市，北京岗照样进队列。"""
     monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {}})
     jobs, stats = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq())
-    assert _ids(jobs) == ["k1", "bj"] and stats["skipped_other_city"] == 0
-    assert stats["skipped_dropped"] == 1 and stats["skipped_untriaged"] == 1
+    assert _ids(jobs) == ["j1", "j3", "j4", "bj"] and stats["skipped_other_city"] == 0
+
+
+def test_analyze_queue_only_scopes_to_visible_set(monkeypatch):
+    """only＝岗位市场「屏幕上看得见的那批」。队列只能在它内部排：
+    把筛掉的岗捎进队列，用户看到「本次 4 个」却实际点了 4 个的 BOSS 额度，
+    而其中 2 个是他刚刚明确筛掉不要看的。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    only = [RetryTarget(job_id="j1"), RetryTarget(job_id="j4")]
+    jobs, stats = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq(only=only))
+    assert _ids(jobs) == ["j1", "j4"]
+    # 白名单外的岗不计入任何闸门：计进「跳过 2 个已分析」等于把用户筛掉的东西当成被拒绝
+    assert stats == {"skipped_other_city": 0, "skipped_analyzed": 0, "need_jd": 1}, stats
+    jobs, _ = server._analyze_queue([dict(r) for r in _QROWS],
+                                    AnalyzeBatchReq(only=only, limit=1))
+    assert _ids(jobs) == ["j1"], "limit 要在收窄之后再截，否则截的是全库"
+
+
+def test_analyze_queue_only_does_not_open_the_gates(monkeypatch):
+    """白名单是「缩小候选集」，不是「放行」：集合里的已分析岗、异地岗照样被两道闸拦下。
+    闸门一松就退化成「点一次把选中的岗全重跑一遍」，那正是 2026-10-09 撤回的老 bug。"""
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
+    only = [RetryTarget(job_id="j2"), RetryTarget(job_id="bj")]   # 已分析的 + 异地的
+    jobs, stats = server._analyze_queue([dict(r) for r in _QROWS], AnalyzeBatchReq(only=only))
+    assert jobs == []
+    assert stats == {"skipped_other_city": 1, "skipped_analyzed": 1, "need_jd": 0}, stats
+
+
+def test_batch_note_announces_filtered_scope(analyze_ready):
+    """进度条上那句「按列表筛选 N 个」是唯一的痕迹：同一颗按钮，筛过和没筛过跑的
+    根本不是一批岗，不写出来就只能靠用户记住自己十分钟前点过哪个 pill。"""
+    analyze_ready(_QROWS)
+    r = server.start_analyze_batch(AnalyzeBatchReq(only=[RetryTarget(job_id="j4"),
+                                                         RetryTarget(job_id="j2")]))
+    assert r["started"] is True, r
+    assert server._batch["note"] == "按列表筛选 1 个 · 其中 1 个要先抓 JD", server._batch["note"]
+    server._batch["running"] = False   # 空壳 worker 不收尾，不复位的话第二次压根没启动
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["started"] is True, r
+    assert "按列表筛选" not in server._batch["note"], "没收窄候选集却播报了筛选，全库看起来像筛过的"
 
 
 @pytest.fixture
@@ -369,31 +359,114 @@ def analyze_ready(monkeypatch):
     monkeypatch.setattr(server, "_ensure_hud", lambda: None)
     monkeypatch.setattr(server, "_progress_start", lambda *a, **k: True)
     monkeypatch.setattr(server, "_progress_update", lambda **k: None)
-    monkeypatch.setattr(server, "_batch_worker", lambda jobs, cfg, cancel: None)
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze": None)
 
     def set_rows(rows):
         monkeypatch.setattr(server.db, "list_jobs",
                             lambda status=None: [dict(r) for r in rows])
     yield set_rows
     server._batch.update({"running": False, "stop": False, "total": 0, "done": 0,
-                          "ok": 0, "failed": 0, "current": "", "errors": []})
+                          "ok": 0, "failed": 0, "current": "", "errors": [],
+                          "failed_jobs": [], "finished_at": 0.0})
 
 
-def test_analyze_batch_starts_only_kept(analyze_ready):
+def test_analyze_batch_starts_after_triage_retired(analyze_ready):
     analyze_ready(_QROWS)
     r = server.start_analyze_batch(AnalyzeBatchReq())
-    assert r["started"] is True and r["total"] == 1
-    assert (r["skipped_dropped"], r["skipped_untriaged"],
-            r["skipped_other_city"], r["skipped_analyzed"]) == (1, 1, 1, 1)
+    assert r["started"] is True and r["total"] == 3        # j1 + 历史 drop 的 j3 + 缺 JD 的 j4
+    assert (r["skipped_other_city"], r["skipped_analyzed"], r["need_jd"]) == (1, 2, 1)
 
 
-def test_analyze_batch_all_dropped_explains_triage(analyze_ready):
-    """队列空时必须说清「为什么没跑起来」，且指向便宜的那一步（先粗筛，不是重抓）。"""
-    analyze_ready([{"platform": "boss", "job_id": "d1", "city": "上海", "triage_keep": 0},
-                   {"platform": "boss", "job_id": "u1", "city": "上海", "triage_keep": None}])
+def test_analyze_batch_empty_queue_explains_why(analyze_ready):
+    """队列空时必须说清「为什么没跑起来」，并把便宜的那一步（force 重跑）指出来。"""
+    analyze_ready([{"platform": "boss", "job_id": "j2", "city": "上海",
+                    "llm_analysis": {"score": 9}}])
     r = server.start_analyze_batch(AnalyzeBatchReq())
     assert r["ok"] is True and r["started"] is False
-    assert "粗筛" in r["message"] and "不匹配" in r["message"]
+    assert "已分析过" in r["message"] and "粗筛" not in r["message"]
+
+
+def test_analyze_batch_missing_jd_runs_fetch_and_analyze(analyze_ready, monkeypatch):
+    """队列里有缺 JD 的岗 → 整批走 fetch_and_analyze：抓完立即分析，一次点击补齐。
+    这是岗位市场「一键抓取并分析」的落点，砍掉它就只能重跑整条智能抓取。"""
+    called = {}
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze": called.update(
+                            mode=mode, ids=[j["job_id"] for j in jobs]))
+    analyze_ready([{"platform": "boss", "job_id": "has_jd", "city": "上海", "jd_text": "正文"},
+                   {"platform": "boss", "job_id": "no_jd", "city": "上海"}])
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["started"] is True and r["need_jd"] == 1, r
+    assert called["mode"] == "fetch_and_analyze", called
+    assert called["ids"] == ["has_jd", "no_jd"], "已有 JD 的岗不能被挤出队列"
+
+
+def test_analyze_batch_all_cached_jd_is_analyze_only(analyze_ready, monkeypatch):
+    """队列里 JD 都在库 → analyze_only：不接管键鼠，Chrome 没开也能跑。"""
+    called = {}
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze": called.update(mode=mode))
+    monkeypatch.setattr(server, "_native_channel_status",
+                        lambda: {"ok": False, "chrome_found": False, "chrome_ready": False})
+    analyze_ready([{"platform": "boss", "job_id": "j1", "city": "上海", "jd_text": "正文"}])
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["started"] is True and r["need_jd"] == 0, r
+    assert called["mode"] == "analyze_only", called
+
+
+def test_analyze_batch_retry_still_fetches_missing_jd(analyze_ready, monkeypatch):
+    """补抓点名的岗里缺 JD 的必须真抓（fetch_and_analyze）；已拿到 JD 的则只重做分析，
+    不再让「补抓」顺手把额度重花一遍。"""
+    called = {}
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze": called.update(mode=mode))
+    analyze_ready([{"platform": "boss", "job_id": "j1", "city": "上海"}])
+    r = server.start_analyze_batch(AnalyzeBatchReq(retry=[{"platform": "boss", "job_id": "j1"}]))
+    assert r["started"] is True and called["mode"] == "fetch_and_analyze", called
+    server._batch["running"] = False   # worker 是空壳，不会自己收尾
+
+    called.clear()
+    analyze_ready([{"platform": "boss", "job_id": "j1", "city": "上海", "jd_text": "正文"}])
+    r = server.start_analyze_batch(AnalyzeBatchReq(retry=[{"platform": "boss", "job_id": "j1"}]))
+    assert r["started"] is True and called["mode"] == "analyze_only", called
+
+
+def test_batch_run_publishes_mode(monkeypatch):
+    """状态接口必须带出 mode：一批到底碰没碰 BOSS（接管键鼠、花额度）是用户最该看见的差别，
+    chip 写死「批量分析」就等于把它藏起来（2026-10-09「点分析却在重抓全库」的观感来源）。"""
+    gate = type("Gate", (), {"stopped": staticmethod(lambda: False)})
+    monkeypatch.setattr(server, "fetch_gate", gate)
+    for mode in ("fetch_and_analyze", "analyze_only"):
+        server._batch["mode"] = ""
+        server._batch_run([], {}, threading.Event(), mode=mode)   # 空队列：只验状态，不跑任何岗位
+        assert server._batch["mode"] == mode
+
+
+def test_batch_start_resets_finish_clock(analyze_ready):
+    """_batch 是进程内字典：新批次若留着上一批的结束时间，刚跑完的结果一打开就被判成过期，
+    「一键补抓」直接点不动——开始时必须把计时归零到本次。"""
+    analyze_ready(_QROWS)
+    server._batch["finished_at"] = time.time() - 6 * 3600      # 上一批是六小时前
+    r = server.start_analyze_batch(AnalyzeBatchReq())
+    assert r["started"] is True, r
+    assert server._batch["finished_at"] > time.time() - 60, "新批次继承了旧批次的结束时间"
+
+
+def test_batch_worker_stamps_finish_time(monkeypatch):
+    """收尾必须盖章：前端判「这份失败清单还作不作数」只看这一个时间戳。
+    从开始就计时、结束时刷新，worker 万一没走到收尾也仍有据可判（不会退回 0=无从判断）。
+
+    不用 `analyze_ready`：那个 fixture 把 `_batch_worker` 换成空壳了，这里要验的正是真的收尾。
+    """
+    monkeypatch.setattr(server, "_batch_run", lambda *a, **k: None)
+    monkeypatch.setattr(server, "_progress_finish", lambda **k: None)
+    server._batch["running"] = True
+    server._batch["finished_at"] = 0.0
+    server._batch_worker([], {}, threading.Event())
+    assert server._batch["finished_at"] > time.time() - 5, "收尾没时间戳，结果面板判不出新旧"
+    assert server._batch["running"] is False
+    server._batch["finished_at"] = 0.0
 
 
 # ---------- run.bat restart：结束旧实例前的三重判定 ----------
@@ -591,73 +664,6 @@ def test_scrape_query_blank_falls_back_to_resume(monkeypatch):
     assert seen["query"] == "高级前端工程师"
 
 
-# ---------- B1：粗筛并发锁 + 预览 + 进度（2026-10-03，全同步接口防连点/防刷新重复起跑） ----------
-
-def _triage_env(monkeypatch, rows=None):
-    """粗筛端点环境 stub：模型可达、db 走内存行、triage_jobs 换成不碰 LLM 的桩。"""
-    monkeypatch.setattr(server, "_get_llm_config",
-                        lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
-    monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
-    monkeypatch.setattr(server.db, "save_job_triage", lambda *a, **k: None)
-    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {"city": "上海"}})
-    monkeypatch.setattr(server.db, "list_jobs", lambda status=None: rows if rows is not None else [])
-    calls = {}
-    def fake_triage(cfg, pdata, jobs, chunk_size=llm.TRIAGE_CHUNK, progress=None):
-        calls["chunk_size"] = chunk_size
-        calls["progress"] = progress
-        if progress:
-            progress(len(jobs), -(-len(jobs) // chunk_size))
-        return [{"platform": "boss", "job_id": j["job_id"], "keep": True,
-                 "reason": "r", "answered": True} for j in jobs]
-    monkeypatch.setattr(server.llm, "triage_jobs", fake_triage)
-    return calls
-
-
-_TRIAGE_ROWS = [
-    {"platform": "boss", "job_id": "a1", "city": "上海", "triage_keep": None},
-    {"platform": "boss", "job_id": "a2", "city": "上海", "triage_keep": None},
-    {"platform": "boss", "job_id": "kept", "city": "上海", "triage_keep": 1},
-    {"platform": "boss", "job_id": "far", "city": "北京", "triage_keep": None},
-]
-
-
-def test_triage_preview_queue口径(monkeypatch):
-    """预览 = 队列口径只读版：未筛 2 个进队列、已粗筛 1 个排除、异地 1 个 L0 拦下。"""
-    _triage_env(monkeypatch, _TRIAGE_ROWS)
-    pv = server.triage_preview()
-    assert pv["pending"] == 2
-    assert pv["chunks"] == -(-2 // llm.TRIAGE_CHUNK)
-    assert pv["skipped_other_city"] == 1
-
-
-def test_triage_busy_lock_rejects_second_run(monkeypatch):
-    """上一轮没跑完时再点必须被服务端拒绝——前端按钮禁用态会随页面刷新丢失。"""
-    _triage_env(monkeypatch, _TRIAGE_ROWS)
-    assert server._triage_lock.acquire(blocking=False)
-    server._triage_state.update(running=True, done=0, total=0)
-    try:
-        r = server.start_triage(TriageReq())
-        assert r["busy"] is True and r["ok"] is False and "粗筛在跑" in r["error"]
-    finally:
-        server._triage_state["running"] = False
-        server._triage_lock.release()
-    # 锁释放后能正常跑完，且跑完锁必然回到释放态（finally 兜底，异常路径同样）
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is True and r["total"] == 2
-    assert not server._triage_state["running"]
-
-
-def test_triage_status_reports_progress(monkeypatch):
-    """进度经 progress 回调写进 _triage_state，状态端点原样吐出。"""
-    calls = _triage_env(monkeypatch, _TRIAGE_ROWS[:2])
-    r = server.start_triage(TriageReq())
-    assert r["ok"] is True
-    assert calls["progress"] is not None          # 回调真的传给了 llm 层
-    s = server.triage_status()
-    assert s["running"] is False
-    assert s["done"] == 2 and s["total"] == -(-2 // llm.TRIAGE_CHUNK)
-
-
 # ---------- C/D 组：数据备份 + 消息截断诚实化（2026-10-03） ----------
 
 def test_backup_roundtrip(tmp_path, monkeypatch):
@@ -705,21 +711,21 @@ def test_messages_endpoint_reports_truncation(tmp_path, monkeypatch):
     assert server.get_messages()["truncated"] is False
 
 
-# ---------- 一键流水线（2026-10-08）：抓取 → 粗筛 → 精配（限额），阶段边界停止 ----------
+# ---------- 一键智能抓取（2026-10-08 收敛的主线）：抓列表 → 抓 JD → AI 分析，阶段边界停止 ----------
 
 def _pipeline_cleanup():
     """流水线测试后的全局态复位（worker 在后台线程跑，monkeypatch 管不到 _batch/锁）。"""
     server._batch.update({"running": False, "stop": False, "total": 0, "done": 0,
                           "ok": 0, "failed": 0, "current": "", "errors": [],
-                          "stage": "", "pipeline": False})
+                          "failed_jobs": [], "stage": "", "pipeline": False, "note": ""})
     if server._pipeline_lock.locked():
         server._pipeline_lock.release()
 
 
 def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None,
                   jd_timeout_ids=None, list_rows=None, new_jobs=None):
-    """流水线全 stub：预检全绿、抓取/粗筛/精配三段全部换成可断言的桩。
-    返回 calls dict 供断言（crawl/triage/batch 计数与 batch_jobs 队列）。"""
+    """流水线全 stub：预检全绿、抓列表/抓 JD/AI 分析三段全部换成可断言的桩。
+    返回 calls dict 供断言（crawl/jd/analyze 计数与被分析的 job_id）。"""
     monkeypatch.setattr(server, "_get_llm_config",
                         lambda mid=None: {"base_url": "https://x/v1", "model": "m"})
     monkeypatch.setattr(server.llm, "chat", lambda *a, **k: "pong")
@@ -735,14 +741,27 @@ def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None,
     monkeypatch.setattr(server, "_progress_scope", lambda *a, **k: _NullScope())
     calls = {"crawl": 0, "jd": 0, "analyze": 0, "analyzed_jobs": []}
 
-    # 默认本次抓到 2 个新岗位（与真实 upsert 后的库状态一致）
+    # 默认本次抓到 2 个新岗位（与真实 upsert 后的库状态一致：真实行一律带 status）
     new_jobs = new_jobs or [{"platform": "boss", "job_id": f"n{i}", "city": "上海",
-                             "title": "AI工程师", "tags": ["Python"]} for i in range(2)]
+                             "title": "AI工程师", "tags": ["Python"], "status": "discovered"}
+                            for i in range(2)]
     rows = list_rows if list_rows is not None else []
-    store = list(rows) + new_jobs          # 模拟 seen_jobs 表：save_jd/save_analysis 原地更新它
+    store = [dict(r) for r in rows]        # 模拟 seen_jobs 表：只装「已在库」的行
+    for r in store:
+        r.setdefault("status", "discovered")
     monkeypatch.setattr(server.db, "list_jobs",
                         lambda status=None: [dict(r) for r in store])
-    monkeypatch.setattr(server.db, "upsert_jobs", lambda jobs: [True] * len(jobs))
+
+    def fake_upsert(jobs):
+        """真实语义：库里没有的才算新岗并落库，已有的返回 False（不打新岗标）。
+        （曾经这里一律返回 True，桩比真实输出乐观，「只抓新岗」类口径测不出来。）"""
+        known = {r.get("job_id") for r in store}
+        flags = [j.get("job_id") not in known for j in jobs]
+        for j, is_new in zip(jobs, flags):
+            if is_new:
+                store.append(dict(j))
+        return flags
+    monkeypatch.setattr(server.db, "upsert_jobs", fake_upsert)
 
     def fake_get_job(platform, job_id):
         for r in store:
@@ -758,11 +777,16 @@ def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None,
         return True
     monkeypatch.setattr(server.db, "save_jd", fake_save_jd)
 
-    def fake_save_analysis(platform, job_id, analysis):
+    def fake_save_analysis(platform, job_id, analysis, review_floor=None):
         calls["analyzed_jobs"].append(job_id)
+        calls.setdefault("review_floor", []).append(review_floor)
         for r in store:
             if r.get("job_id") == job_id:
                 r["llm_analysis"] = analysis
+                if (review_floor is not None and isinstance(analysis.get("score"), (int, float))
+                        and r.get("status", "discovered") == "discovered"
+                        and analysis["score"] >= review_floor):
+                    r["status"] = "reviewing"
         return True
     monkeypatch.setattr(server.db, "save_job_analysis", fake_save_analysis)
 
@@ -794,18 +818,22 @@ def _pipeline_env(monkeypatch, crawl_result=None, jd_fail_ids=None,
     return calls
 
 
-def _wait_pipeline_done(timeout_s=3.0):
+def _wait_pipeline_done(timeout_s=3.0, cleanup=True):
     """等流水线后台线程跑完（全 stub 毫秒级；跑不完即超时失败）。
-    返回结束时 _batch 的快照（cleanup 会清 errors，断言用快照）。"""
+    返回结束时 _batch 的快照（cleanup 会清 errors，断言用快照）。
+    cleanup=False 时不释放流水线锁——用来检验「锁由生产代码自己归还」。"""
     import time as _t
     deadline = _t.time() + timeout_s
     while _t.time() < deadline:
         if not server._batch["running"]:
-            snap = {"errors": list(server._batch["errors"])}
-            _pipeline_cleanup()
+            snap = {"errors": list(server._batch["errors"]), "note": server._batch["note"],
+                    "failed_jobs": [dict(r) for r in server._batch["failed_jobs"]]}
+            if cleanup:
+                _pipeline_cleanup()
             return snap
         _t.sleep(0.02)
-    _pipeline_cleanup()
+    if cleanup:
+        _pipeline_cleanup()
     raise AssertionError("流水线线程 3 秒内未结束")
 
 
@@ -820,6 +848,45 @@ def test_pipeline_happy_path(monkeypatch):
         assert len(env["analyzed_jobs"]) == 2
         assert server._batch["pipeline"] is False and server._batch["stage"] == ""
         assert not snap["errors"]
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_jd_scope_covers_new_and_jd_less_old_jobs(monkeypatch):
+    """抓 JD 范围（2026-10-09 用户裁定）：缺 JD 的一律真抓——本次新岗 + 库里已有但缺
+    JD 的老岗；库里已有 JD 的免费复用，不再花额度。实际数量如实写进 note。"""
+    old_missing = {"platform": "boss", "job_id": "o1", "city": "上海", "title": "老岗缺JD"}
+    old_cached = {"platform": "boss", "job_id": "o2", "city": "上海", "title": "老岗有JD",
+                  "jd_text": "已有正文"}
+    njobs = [{"platform": "boss", "job_id": f"n{i}", "city": "上海", "title": "新岗"}
+             for i in range(2)]
+    env = _pipeline_env(monkeypatch, list_rows=[old_missing, old_cached],
+                        new_jobs=[old_missing, old_cached] + njobs)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["jd"] == 3, "2 个新岗 + 1 个缺 JD 的老岗；有缓存的 o2 不该再花额度"
+        assert sorted(env["analyzed_jobs"]) == ["n0", "n1", "o1", "o2"]   # 有 JD 的都分析
+        assert "抓 JD 3 个" in snap["note"] and "新岗 2" in snap["note"]
+        assert "补库里缺 JD 的老岗 1" in snap["note"]
+        assert "复用" in snap["note"]
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_skips_already_analyzed_jobs(monkeypatch):
+    """有 JD 但已分析过的岗位不再分析：同一关键词反复抓列表时不重复烧 token。"""
+    old_done = {"platform": "boss", "job_id": "o9", "city": "上海", "title": "已分析老岗",
+                "jd_text": "已有正文", "llm_analysis": {"score": 80}}
+    njobs = [{"platform": "boss", "job_id": f"p{i}", "city": "上海", "title": "新岗"}
+             for i in range(2)]
+    env = _pipeline_env(monkeypatch, list_rows=[old_done],
+                        new_jobs=[old_done] + njobs)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert sorted(env["analyzed_jobs"]) == ["p0", "p1"], "o9 已有分析，不该再来一次"
+        assert "跳过 1" in snap["note"]
     finally:
         _pipeline_cleanup()
 
@@ -916,5 +983,255 @@ def test_pipeline_timeout_then_success_resets_counter(monkeypatch):
         assert env["jd"] == 3 and env["analyze"] == 2
         assert not any("已自动熔断" in e for e in snap["errors"])
         assert any("JD 抓取失败" in e or "1 个岗位" in e for e in snap["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_nontimeout_failures_circuit_break(monkeypatch):
+    """连续「非超时」失败（Chrome 中途被关 / 风控 / 无 url）也要熔断，剩余岗位不再试。
+
+    回归：2026-10-09 之前流水线抄了一份循环体，只把「抓取超时」计入熔断，其它失败
+    一律清零重来 → 环境类故障时剩余二十几个岗位每岗走满三层降级，纯空烧。
+    """
+    fjobs = [{"platform": "boss", "job_id": f"f{i}", "city": "上海",
+              "title": "AI工程师"} for i in range(5)]
+    env = _pipeline_env(monkeypatch, jd_fail_ids={f"f{i}" for i in range(5)},
+                        list_rows=[], new_jobs=fjobs)
+    try:
+        server.start_pipeline(PipelineReq())
+        snap = _wait_pipeline_done()
+        assert env["jd"] == 3, "连 3 次失败应熔断，第 4、5 个不该再试"
+        assert env["analyze"] == 0
+        assert any("已自动停止" in e and "Chrome" in e for e in snap["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_batch_run_timeout_breaker_is_shared(monkeypatch):
+    """软锁熔断在共用循环里，手动批量（fetch_and_analyze）同样连 2 次超时即停。
+
+    旧版只有通用「连 3 失败」熔断，超时不单独计——每岗 150s×3 层降级的代价下，
+    第 3 次才停等于多烧一整个岗位。
+    """
+    monkeypatch.setattr(server.fetch_gate, "checkpoint", lambda: None)
+    monkeypatch.setattr(server.fetch_gate, "stopped", lambda: False)
+    monkeypatch.setattr(server, "_progress_update", lambda **k: None)
+    calls = {"jd": 0}
+
+    def fake_fetch(job, refresh=False, cancel=None):
+        calls["jd"] += 1
+        return {"ok": False, "error": "抓取超时（150s）；直连亦未解析到 JD"}
+    monkeypatch.setattr(server, "_fetch_jd_core", fake_fetch)
+    server._batch.update({"running": True, "stop": False, "total": 5, "done": 0,
+                          "ok": 0, "failed": 0, "current": "", "errors": [],
+                          "stage": "", "pipeline": False})
+    server._batch_cancel.clear()
+    try:
+        jobs = [{"platform": "boss", "job_id": f"b{i}", "title": "AI工程师"} for i in range(5)]
+        server._batch_run(jobs, {"base_url": "x", "model": "m"}, server._batch_cancel)
+        assert calls["jd"] == 2, "第 2 次超时就该熔断，不该试第 3 个"
+        assert any("已自动熔断" in e and "软性限流" in e for e in server._batch["errors"])
+    finally:
+        _pipeline_cleanup()
+
+
+def test_match_analysis_endpoint_passes_review_floor(monkeypatch):
+    """单岗分析端点也要带升档门槛：流水线之外（详情弹窗手动分析）是唯一另一条分析落库路径，
+    漏传就等于「批量会升档、单点不会」的隐性双标。"""
+    seen = {}
+    monkeypatch.setattr(server.db, "get_job",
+                        lambda p, j: {"platform": p, "job_id": j, "title": "AI工程师",
+                                      "status": "discovered", "llm_analysis": None})
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {}})
+    monkeypatch.setattr(server, "_get_llm_config", lambda mid=None: {"base_url": "x", "model": "m"})
+    monkeypatch.setattr(server.llm, "analyze_match", lambda *a, **k: {"score": 91})
+    monkeypatch.setattr(server.db, "save_job_analysis",
+                        lambda p, j, a, review_floor=None: seen.update(args=(p, j, a["score"], review_floor)))
+    out = server.match_analysis(AnalyzeReq(job_id="m1"))
+    assert out["ok"] is True
+    assert seen["args"] == ("boss", "m1", 91, server._AUTO_REVIEW_SCORE)
+
+
+def test_batch_run_analyze_passes_review_floor(monkeypatch):
+    """批量分析（共用循环的 analyze_only）同样把门槛透传到 db 层。"""
+    floors = []
+    monkeypatch.setattr(server.fetch_gate, "checkpoint", lambda: None)
+    monkeypatch.setattr(server.fetch_gate, "stopped", lambda: False)
+    monkeypatch.setattr(server, "_progress_update", lambda **k: None)
+    monkeypatch.setattr(server.db, "get_job",
+                        lambda p, j: {"platform": p, "job_id": j, "title": "AI工程师"})
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {}})
+    monkeypatch.setattr(server.llm, "analyze_match", lambda *a, **k: {"score": 88})
+    monkeypatch.setattr(server.db, "save_job_analysis",
+                        lambda p, j, a, review_floor=None: floors.append(review_floor))
+    server._batch.update({"running": True, "stop": False, "total": 1, "done": 0,
+                          "ok": 0, "failed": 0, "current": "", "errors": [],
+                          "stage": "", "pipeline": False})
+    server._batch_cancel.clear()
+    try:
+        server._batch_run([{"platform": "boss", "job_id": "q1", "title": "AI工程师"}],
+                          {"base_url": "x", "model": "m"}, server._batch_cancel,
+                          mode="analyze_only")
+        assert floors == [server._AUTO_REVIEW_SCORE]
+    finally:
+        _pipeline_cleanup()
+
+
+def test_pipeline_broadcasts_auto_promoted_count(monkeypatch):
+    """播报里必须有「自动升入评估列 N 个」：漏斗入口从粗筛换成 AI 分之后，
+    条数是这条路径唯一可观测的证据，静默升档等于用户看不出它生效过。"""
+    env = _pipeline_env(monkeypatch)          # 桩分析分 80 ≥ 门槛 70 → 2 个新岗都该升
+    try:
+        assert server.start_pipeline(PipelineReq()).get("started") is True
+        snap = _wait_pipeline_done()
+        assert "自动升入评估列 2 个" in snap["note"], snap["note"]
+    finally:
+        _pipeline_cleanup()
+    # 反向：分不够就一个都不升，播报也必须写 0，不能省略成「看起来没这回事」
+    _pipeline_env(monkeypatch)
+    monkeypatch.setattr(server.llm, "analyze_match",
+                        lambda *a, **k: {"verdict": "v", "score": 40})
+    try:
+        assert server.start_pipeline(PipelineReq()).get("started") is True
+        snap = _wait_pipeline_done()
+        assert "自动升入评估列 0 个" in snap["note"], snap["note"]
+    finally:
+        _pipeline_cleanup()
+
+
+# ---------- P6「结果看不见」（2026-10-09）：失败岗结构化 + 熔断指引不截断 + 一键补抓 ----------
+
+
+def test_batch_records_failed_jobs(monkeypatch):
+    """失败岗必须留下「是哪个岗、死在哪一步」的结构化记录。
+
+    P6 的根因：进度 chip 只有一句截断文本，用户看不出哪个岗失败、也看不出失败在
+    JD 抓取（花 BOSS 额度、要冷却）还是 AI 分析（只花 token、可直接重试）——
+    两者补救动作完全不同，混成一条错误列表等于没区分。
+    """
+    monkeypatch.setattr(server.fetch_gate, "checkpoint", lambda: None)
+    monkeypatch.setattr(server.fetch_gate, "stopped", lambda: False)
+    monkeypatch.setattr(server, "_progress_update", lambda **k: None)
+    monkeypatch.setattr(server.db, "get_profile", lambda: {"data": {}})
+    monkeypatch.setattr(server.db, "get_job",
+                        lambda p, j: {"platform": p, "job_id": j, "title": "AI工程师"})
+
+    def fake_fetch(job, refresh=False, cancel=None):
+        if job["job_id"] == "x0":
+            return {"ok": False, "error": "抓取超时（150s）"}
+        return {"ok": True}
+    monkeypatch.setattr(server, "_fetch_jd_core", fake_fetch)
+
+    def boom(*a, **k):
+        raise llm.LLMError("模型连接失败")
+    monkeypatch.setattr(server.llm, "analyze_match", boom)
+
+    server._batch.update({"running": True, "stop": False, "total": 2, "done": 0,
+                          "ok": 0, "failed": 0, "current": "", "errors": [],
+                          "failed_jobs": [], "stage": "", "pipeline": False})
+    server._batch_cancel.clear()
+    try:
+        jobs = [{"platform": "boss", "job_id": "x0", "title": "岗零", "company": "甲"},
+                {"platform": "boss", "job_id": "x1", "title": "岗一", "company": "乙"}]
+        server._batch_run(jobs, {"base_url": "x", "model": "m"}, server._batch_cancel)
+        rec = server._batch["failed_jobs"]
+        assert [r["job_id"] for r in rec] == ["x0", "x1"]
+        assert [r["stage"] for r in rec] == ["jd", "analyze"], "死在哪一步决定怎么补救"
+        assert [r["platform"] for r in rec] == ["boss", "boss"]
+        assert rec[0]["title"] == "岗零" and rec[1]["company"] == "乙"
+        assert "抓取超时" in rec[0]["error"] and "模型连接失败" in rec[1]["error"]
+    finally:
+        _pipeline_cleanup()
+
+
+def test_batch_failed_jobs_survive_pipeline_stages(monkeypatch):
+    """流水线两段各自重置进度计数，但失败清单不能跟着清空：
+    JD 抓取阶段失败的岗正是「冷却后一键补抓」的对象，分析阶段一跑就被抹掉等于看不见。"""
+    env = _pipeline_env(monkeypatch, jd_fail_ids={"n0"})
+    try:
+        assert server.start_pipeline(PipelineReq()).get("started") is True
+        snap = _wait_pipeline_done()
+        assert [r["job_id"] for r in snap["failed_jobs"]] == ["n0"]
+        assert snap["failed_jobs"][0]["stage"] == "jd"
+    finally:
+        _pipeline_cleanup()
+
+
+def test_breaker_messages_are_not_truncated(monkeypatch):
+    """熔断指引是结果面板里最该读全的一句话：句尾的补救动作不能被截掉，
+    且要指向新的聚合入口，不再是「逐个开详情弹窗补抓」。"""
+    tjobs = [{"platform": "boss", "job_id": f"t{i}", "city": "上海", "title": "AI工程师"}
+             for i in range(5)]
+    _pipeline_env(monkeypatch, jd_timeout_ids={f"t{i}" for i in range(5)},
+                  list_rows=[], new_jobs=tjobs)
+    try:
+        assert server.start_pipeline(PipelineReq()).get("started") is True
+        snap = _wait_pipeline_done()
+        msg = [e for e in snap["errors"] if "已自动熔断" in e][0]
+        assert "剩余 3 个岗位" in msg, msg
+        assert msg.endswith("「重试这 N 个失败岗」"), f"句尾补救指引被截掉了：{msg!r}"
+    finally:
+        _pipeline_cleanup()
+
+    fjobs = [{"platform": "boss", "job_id": f"f{i}", "city": "上海", "title": "AI工程师"}
+             for i in range(5)]
+    _pipeline_env(monkeypatch, jd_fail_ids={f"f{i}" for i in range(5)},
+                  list_rows=[], new_jobs=fjobs)
+    try:
+        assert server.start_pipeline(PipelineReq()).get("started") is True
+        snap = _wait_pipeline_done()
+        msg = [e for e in snap["errors"] if "已自动停止" in e][0]
+        assert "剩余 2 个未处理" in msg, msg
+        assert msg.endswith("见结果面板）"), f"句尾指引被截掉了：{msg!r}"
+    finally:
+        _pipeline_cleanup()
+
+
+def test_analyze_batch_retry_runs_only_named_jobs(analyze_ready, monkeypatch):
+    """点名重试：队列＝点名的失败岗，跳过城市/已分析两道闸门（它们是人工从失败清单挑的，
+    再拦一遍就成了「点了没反应」），但四道预检一个都不能省——重跑照样花 JD 抓取额度。"""
+    captured = {}
+    monkeypatch.setattr(server, "_batch_worker",
+                        lambda jobs, cfg, cancel, mode="fetch_and_analyze":
+                        captured.update(jobs=jobs))
+    analyze_ready([{"platform": "boss", "job_id": "j1", "city": "上海"},
+                   {"platform": "boss", "job_id": "j2", "city": "北京",
+                    "llm_analysis": {"score": 9}},
+                   {"platform": "boss", "job_id": "j3", "city": "上海",
+                    "llm_analysis": {"score": 5}}])
+
+    r = server.start_analyze_batch(AnalyzeBatchReq(retry=[{"platform": "boss", "job_id": "j2"},
+                                                          {"platform": "boss", "job_id": "zz"}]))
+    assert r["ok"] is True and r["started"] is True
+    assert [j["job_id"] for j in captured["jobs"]] == ["j2"], "异地 + 已分析都不该拦点名补抓"
+    assert r["total"] == 1 and r["retry_missing"] == 1, "库里没有的 id 要如实报数，不静默吞掉"
+
+    server._batch["running"] = False
+    monkeypatch.setattr(server, "_native_channel_status",
+                        lambda: {"ok": False, "chrome_found": False, "chrome_ready": False})
+    r = server.start_analyze_batch(AnalyzeBatchReq(retry=[{"platform": "boss", "job_id": "j1"}]))
+    assert r["ok"] is False and "原生通道" in r["error"], "retry 不能绕过原生通道预检去空烧额度"
+
+
+def test_pipeline_can_run_again_after_finish(monkeypatch):
+    """回归：一次流水线跑完后，同一进程内必须能立刻再跑第二次。
+
+    2026-10-08 的 `start_pipeline` 用 `_pipeline_lock.acquire()` 占锁、全链路无人
+    release（worker 的 finally 只复位 `_batch`）→ 一次服务生命周期内只能成功发起一次，
+    之后每次都是 `{'ok': False, 'error': '已有流水线在跑'}`，而此时 `_batch['running']`
+    早已是 False，界面上看不出任何区别。其余流水线用例靠 `_pipeline_cleanup()` 替生产
+    代码放了锁，所以全绿也照不出这条——本用例刻意不放。
+    """
+    _pipeline_env(monkeypatch)
+    try:
+        r1 = server.start_pipeline(PipelineReq())
+        assert r1.get("started") is True, r1
+        _wait_pipeline_done(cleanup=False)
+        assert server._pipeline_lock.locked() is False, "流水线跑完锁没归还"
+
+        r2 = server.start_pipeline(PipelineReq())
+        assert r2.get("started") is True, f"第二次流水线被拒：{r2}"
+        _wait_pipeline_done(cleanup=False)
+        assert server._pipeline_lock.locked() is False, "流水线跑完锁没归还"
     finally:
         _pipeline_cleanup()

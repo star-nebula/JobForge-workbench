@@ -122,6 +122,30 @@ def test_job_analysis_cache(tmp_db):
     assert tmp_db.save_job_analysis("boss", "nope", {}) is False
 
 
+def test_analysis_auto_promotes_reviewing(tmp_db):
+    """带 review_floor 的分析落库：达标把 discovered 升入 reviewing，且只向前不回退。
+    2026-10-09 粗筛退出主线后，漏斗入口改由 AI 分析分驱动，这里就是那条边界的唯一落点。"""
+    tmp_db.upsert_jobs([_job(job_id="a"), _job(job_id="b"), _job(job_id="c")])
+    tmp_db.save_job_analysis("boss", "a", {"score": 75}, review_floor=70)
+    assert tmp_db.get_job("boss", "a")["status"] == "reviewing"            # 达标 → 升档
+    tmp_db.save_job_analysis("boss", "b", {"score": 69}, review_floor=70)
+    assert tmp_db.get_job("boss", "b")["status"] == "discovered"           # 差 1 分不动
+    tmp_db.update_job_status("boss", "c", "applied", "已投")
+    tmp_db.save_job_analysis("boss", "c", {"score": 99}, review_floor=70)
+    assert tmp_db.get_job("boss", "c")["status"] == "applied"              # 更后段不回退
+
+
+def test_analysis_without_floor_never_moves_status(tmp_db):
+    """不传 review_floor＝纯缓存分析，绝不动状态；score 缺失或类型不对也不炸。"""
+    tmp_db.upsert_jobs([_job(job_id="a"), _job(job_id="b")])
+    tmp_db.save_job_analysis("boss", "a", {"score": 99})
+    assert tmp_db.get_job("boss", "a")["status"] == "discovered"
+    tmp_db.save_job_analysis("boss", "b", {"score": None}, review_floor=70)
+    assert tmp_db.get_job("boss", "b")["status"] == "discovered"
+    tmp_db.save_job_analysis("boss", "b", {"score": True}, review_floor=70)
+    assert tmp_db.get_job("boss", "b")["status"] == "discovered"   # bool 是 int 子类，不当分数
+
+
 def test_jd_stats(tmp_db):
     """JD 覆盖统计：空库 / 有 JD / 无 JD / 空白串不算有 / 疑似残缺单列。"""
     assert tmp_db.get_jd_stats() == {
@@ -168,49 +192,31 @@ def test_jd_confirm(tmp_db):
     assert tmp_db.get_jd_stats()["thin"] == 1
 
 
-def test_triage_roundtrip(tmp_db):
-    """triage_keep 三态可分：NULL=没筛过、1=值得精配、0=判不匹配。"""
+def _seed_legacy_triage(tmp_db, job_id, keep, reason="历史判定"):
+    """粗筛写入函数已随 L1 接口族下线（2026-10-09），这里直接落 SQL 造历史数据，
+    钉住用户裁定的那一半：列与已有判定保留，只是不再有写的入口。"""
+    with tmp_db._conn() as c:
+        c.execute("UPDATE seen_jobs SET triage_keep=?, triage_reason=?, triage_at=? "
+                  "WHERE job_id=?", (keep, reason, 1_700_000_000, job_id))
+
+
+def test_legacy_triage_survives_rescrape(tmp_db):
+    """重抓同一岗位走 upsert 的 UPDATE 分支，历史粗筛判定不能被列表落库冲掉。"""
     tmp_db.upsert_jobs([_job()])
-    assert tmp_db.get_job("boss", "abc123")["triage_keep"] is None
-    assert tmp_db.save_job_triage("boss", "abc123", False, "岗位性质与方向无关") is True
-    j = tmp_db.get_job("boss", "abc123")
-    assert j["triage_keep"] == 0 and j["triage_reason"] == "岗位性质与方向无关"
-    assert isinstance(j["triage_at"], int)
-    assert tmp_db.save_job_triage("boss", "abc123", True, "方向对口") is True
-    assert tmp_db.get_job("boss", "abc123")["triage_keep"] == 1
-    assert tmp_db.save_job_triage("boss", "ghost", True, "") is False
-
-
-def test_triage_keep_promotes_to_reviewing(tmp_db):
-    """粗筛通过自动进流水线（2026-10-03 流转定稿）：keep=1 且仍停在 discovered → reviewing。
-    只向前不回退：已在 applied 等更后段的不动；keep=0 只落判定，不改状态。"""
-    tmp_db.upsert_jobs([_job(), _job(job_id="late"), _job(job_id="dropped")])
-    tmp_db.update_job_status("boss", "late", "applied")
-    assert tmp_db.save_job_triage("boss", "abc123", True, "方向对口") is True
-    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
-    assert tmp_db.save_job_triage("boss", "late", True, "依然对口") is True
-    assert tmp_db.get_job("boss", "late")["status"] == "applied"
-    assert tmp_db.save_job_triage("boss", "dropped", False, "方向无关") is True
-    assert tmp_db.get_job("boss", "dropped")["status"] == "discovered"
-
-
-def test_init_db_backfills_triage_kept_discovered(tmp_db):
-    """启动回填幂等自愈：keep=1 却仍停在 discovered 的老库残留一律升入评估列。"""
-    tmp_db.upsert_jobs([_job()])
-    tmp_db.save_job_triage("boss", "abc123", True, "方向对口")
-    with tmp_db._conn() as c:                       # 模拟老库：判定在、状态没跟上
-        c.execute("UPDATE seen_jobs SET status='discovered' WHERE job_id='abc123'")
-    tmp_db.init_db()
-    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
-    tmp_db.init_db()                                # 再跑一遍不许抖动
-    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
-
-
-def test_triage_survives_rescrape(tmp_db):
-    """重新抓到同一岗位会走 UPDATE 分支，粗筛判定不能被列表 upsert 冲掉。"""
-    tmp_db.upsert_jobs([_job()])
-    tmp_db.save_job_triage("boss", "abc123", False, "方向无关")
+    _seed_legacy_triage(tmp_db, "abc123", 0, "方向无关")
     tmp_db.upsert_jobs([_job(title="前端工程师（改）")])
     j = tmp_db.get_job("boss", "abc123")
     assert j["title"] == "前端工程师（改）"
     assert j["triage_keep"] == 0 and j["triage_reason"] == "方向无关"
+    assert j["status"] == "discovered"          # keep=0 的历史岗不被动状态
+
+
+def test_init_db_backfills_legacy_triage_kept(tmp_db):
+    """启动回填只兜老库残留：keep=1 却仍停在 discovered 的升入评估列，再跑一遍不抖动。
+    新的升档入口是 AI 分析分（test_analysis_auto_promotes_reviewing），不再依赖粗筛。"""
+    tmp_db.upsert_jobs([_job()])
+    _seed_legacy_triage(tmp_db, "abc123", 1)
+    tmp_db.init_db()
+    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
+    tmp_db.init_db()
+    assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
