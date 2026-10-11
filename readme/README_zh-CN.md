@@ -33,6 +33,7 @@ JobForge-workbench/
 ├─ web/job-workbench.html        # 前端单页（6 视图）
 ├─ data/                         # 运行时数据（不入库）：jobs.db、cookies.json、messages.json、闸门/节流文件、chrome-profile/
 ├─ tests/                        # pytest 回归（先 `pip install -r requirements-dev.txt`，再 `venv\Scripts\python.exe -m pytest tests/`；例数不进文档，以现跑为准）
+├─ docs/                         # architecture.md（信息架构图，四张）+ screenshots/
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
@@ -56,6 +57,8 @@ venv\Scripts\python.exe -m jobforge.server
 ```
 
 ## 架构
+
+下表讲「哪个文件干什么」；想知道「为什么这么连」——信息在哪里产生、存在哪、被谁读回——见 [`docs/architecture.md`](../docs/architecture.md)（Mermaid 图，附 ASCII 兜底）：进程拓扑、数据模型、主线流水线（一键智能抓取）、前端信息架构。该文档 §7 列了画图时发现的文档与代码漂移点。
 
 | 文件 | 作用 |
 |---|---|

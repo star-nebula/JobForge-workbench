@@ -33,6 +33,7 @@ JobForge-workbench/
 ├─ web/job-workbench.html        # Página única del frontend (6 vistas)
 ├─ data/                         # Datos en tiempo de ejecución (no se versionan): jobs.db, cookies.json, messages.json, archivos de compuerta/limitación, chrome-profile/
 ├─ tests/                        # Regression con pytest (primero `pip install -r requirements-dev.txt`, luego `venv\Scripts\python.exe -m pytest tests/`; la cantidad de tests no se documenta: se ejecutan para verla)
+├─ docs/                         # architecture.md (mapas de arquitectura de la información, 4, en chino) + screenshots/
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
@@ -54,6 +55,8 @@ venv\Scripts\python.exe -m jobforge.server
 ```
 
 ## Arquitectura
+
+Esta tabla dice *qué hace cada archivo*. *Por qué están cableados así* — dónde se produce la información, dónde se guarda y quién la vuelve a leer — está en [`docs/architecture.md`](../docs/architecture.md) (en chino; diagramas Mermaid con alternativa ASCII): topología de procesos, modelo de datos, el pipeline principal (recolección en un clic) y la arquitectura de información del frontend. Su §7 enumera las divergencias doc/código halladas al dibujarlos.
 
 | Archivo | Función |
 |---|---|

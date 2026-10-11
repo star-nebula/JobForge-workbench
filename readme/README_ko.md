@@ -33,6 +33,7 @@ JobForge-workbench/
 ├─ web/job-workbench.html        # 프론트엔드 단일 페이지(6개 뷰)
 ├─ data/                         # 런타임 데이터(커밋하지 않음): jobs.db, cookies.json, messages.json, 게이트/스로틀 파일, chrome-profile/
 ├─ tests/                        # pytest 회귀 테스트(먼저 `pip install -r requirements-dev.txt` 실행 후 `venv\Scripts\python.exe -m pytest tests/`; 테스트 수는 문서에 적지 않고 실행으로 확인)
+├─ docs/                         # architecture.md(정보 아키텍처 도해 4장, 중국어) + screenshots/
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
@@ -54,6 +55,8 @@ venv\Scripts\python.exe -m jobforge.server
 ```
 
 ## 아키텍처
+
+아래 표는 「어떤 파일이 무엇을 하는가」를 말합니다. 「왜 이렇게 연결했는가」— 정보가 어디서 만들어져 어디에 저장되고 누가 다시 읽는가 — 는 [`docs/architecture.md`](../docs/architecture.md)(중국어 기재, Mermaid 도해 + ASCII 대안)를 보십시오: 프로세스 위상 구조, 데이터 모델, 주 파이프라인(원클릭 자동 수집), 프론트엔드 정보 구조. 해당 문서의 §7 에 도해를 그리다 발견한 문서-코드 불일치 목록이 있습니다.
 
 | 파일 | 역할 |
 |---|---|

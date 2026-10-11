@@ -33,6 +33,7 @@ JobForge-workbench/
 ├─ web/job-workbench.html        # フロントエンド単一ページ（6 ビュー）
 ├─ data/                         # 実行時データ（コミット対象外）：jobs.db、cookies.json、messages.json、ゲート/スロットルファイル、chrome-profile/
 ├─ tests/                        # pytest 回帰テスト（先に `pip install -r requirements-dev.txt` を実行してから `venv\Scripts\python.exe -m pytest tests/`。件数はドキュメントに書かず実行で確認）
+├─ docs/                         # architecture.md（情報アーキテクチャ図 4 枚、中国語）+ screenshots/
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
 
@@ -54,6 +55,8 @@ venv\Scripts\python.exe -m jobforge.server
 ```
 
 ## アーキテクチャ
+
+この表は「どのファイルが何をするか」を説明します。「なぜこの接続になっているか」——情報がどこで生まれ、どこに保存され、誰が読み戻すか——は [`docs/architecture.md`](../docs/architecture.md)（中国語、Mermaid 図 + ASCII 代替）を参照してください：プロセスのトポロジ、データモデル、主ラインパイプライン（ワンクリック自動収集）、フロントエンドの情報アーキテクチャ。同文書の §7 は作図中に見つけたドキュメントと実装のズレの一覧です。
 
 | ファイル | 役割 |
 |---|---|
