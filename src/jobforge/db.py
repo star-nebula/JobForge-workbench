@@ -4,7 +4,7 @@
 - platform + job_id 联合主键（同一岗位可能跨平台但 BOSS 单平台下 job_id 唯一，仍保留双键防扩展）
 - status: discovered / reviewing / applied / interviewing / rejected / offered
 - first_seen_at / last_seen_at：判断"新岗位"用
-- match_score / tags / 详情字段冗余存（避免每次重新抓）
+- tags / jd_text / llm_analysis 冗余存（避免每次重新抓与重新分析）
 
 表 messages：消息中心会话缓存（msg_id 主键，每会话存最后一条消息 + 未读数）。
 
@@ -34,7 +34,9 @@ def _conn() -> sqlite3.Connection:
 
 def init_db():
     """建表 + 加索引（幂等）。在 server 启动时调一次。
-    P3 升级：加 score_detail 字段（JSON 字符串存 4 维 + reasoning）。
+
+    只做「补新列」的向前兼容；删列（如 2026-10-13 下线的本地规则评分两列）一律走
+    tools/ 下的一次性迁移脚本，不在启动路径上静默做不可逆变更。
     """
     with _conn() as c:
         c.execute("""
@@ -49,8 +51,6 @@ def init_db():
                 education TEXT,
                 tags TEXT,           -- JSON array
                 url TEXT,
-                match_score INTEGER,
-                score_detail TEXT,  -- P3: JSON {overall, skills_match, experience_match, salary_match, location_match, reasoning}
                 status TEXT DEFAULT 'discovered',
                 notes TEXT,
                 first_seen_at INTEGER,
@@ -58,10 +58,7 @@ def init_db():
                 PRIMARY KEY (platform, job_id)
             )
         """)
-        # 兼容老库：如果 seen_jobs 已存在但缺 score_detail，自动 ALTER ADD
         cols = [r[1] for r in c.execute("PRAGMA table_info(seen_jobs)").fetchall()]
-        if "score_detail" not in cols:
-            c.execute("ALTER TABLE seen_jobs ADD COLUMN score_detail TEXT")
         # 面试日程：约定时间（毫秒时间戳）+ 备注；设了时间自动置 status='interviewing'
         if "interview_at" not in cols:
             c.execute("ALTER TABLE seen_jobs ADD COLUMN interview_at INTEGER")
@@ -153,7 +150,7 @@ def init_db():
 
 def upsert_jobs(jobs: List[Dict]) -> List[Dict]:
     """批量 upsert 岗位列表。返回每个岗位是否本次新增（is_new=true）。
-    已存在的岗位更新 last_seen_at + match_score + 字段，但保留原 status/notes。"""
+    已存在的岗位更新 last_seen_at + 抓到的字段，但保留原 status/notes。"""
     now = int(time.time())
     is_new_map = {}
     if not jobs:
@@ -172,28 +169,24 @@ def upsert_jobs(jobs: List[Dict]) -> List[Dict]:
             if row is None:
                 c.execute(
                     "INSERT INTO seen_jobs (platform, job_id, title, company, salary, city, "
-                    "experience, education, tags, url, match_score, score_detail, status, notes, "
+                    "experience, education, tags, url, status, notes, "
                     "first_seen_at, last_seen_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (pid, jid, j.get("title", ""), j.get("company", ""), j.get("salary", ""),
                      j.get("city", ""), j.get("experience", ""), j.get("education", ""),
                      json.dumps(tags, ensure_ascii=False), j.get("url", ""),
-                     int(j.get("match_score") or 0),
-                     json.dumps(j.get("score_detail") or {}, ensure_ascii=False),
                      "discovered", "", now, now)
                 )
                 is_new_map[(pid, jid)] = True
             else:
                 c.execute("""
                     UPDATE seen_jobs SET title=?, company=?, salary=?, city=?, experience=?,
-                        education=?, tags=?, url=?, match_score=?, score_detail=?, last_seen_at=?
+                        education=?, tags=?, url=?, last_seen_at=?
                     WHERE platform=? AND job_id=?
                 """, (
                     j.get("title", ""), j.get("company", ""), j.get("salary", ""),
                     j.get("city", ""), j.get("experience", ""), j.get("education", ""),
                     json.dumps(tags, ensure_ascii=False), j.get("url", ""),
-                    int(j.get("match_score") or 0),
-                    json.dumps(j.get("score_detail") or {}, ensure_ascii=False),
                     now, pid, jid,
                 ))
                 is_new_map[(pid, jid)] = False
@@ -368,49 +361,76 @@ def get_jd_stats() -> Dict:
     }
 
 
+# AI 分析分分档阈值：与前端 AI 分析卡的 tone 分档同口径（一处改两处必然漂移，故只认这里）
+AI_SCORE_HIGH = 75
+AI_SCORE_MID = 50
+
+
+def _ai_score(job: Dict):
+    """取岗位的 AI 分析分。未分析、或分数不是数值 → None（不参与聚合，不冒充 0 分）。"""
+    a = job.get("llm_analysis")
+    s = a.get("score") if isinstance(a, dict) else None
+    if isinstance(s, bool) or not isinstance(s, (int, float)):
+        return None
+    return s
+
+
 def get_stats() -> Dict:
     """看板聚合统计（全部来自 seen_jobs 真实数据）。
 
-    返回：total / status_dist / avg_score / score_dist / trend_14d / top_jobs / recent_jobs
+    匹配分口径（2026-10-13 本地规则分整族下线）：只统计**已 AI 分析**的岗位，
+    并显式给出分母 analyzed_count/total——166 份样本的均分不能被说成 238 个岗的真值。
+    聚合放 Python 而非 SQL json_extract：坏 JSON 在 _row_to_dict 里被容错成 None，
+    而 SQL 侧会直接让整条查询抛异常，同一份数据两处口径必须一致。
+
+    返回：total / analyzed_count / status_dist / avg_score / score_dist
+          / trend_14d / top_jobs / recent_jobs
     """
     now = int(time.time())
     day = 86400
     with _conn() as c:
-        total = c.execute("SELECT COUNT(*) FROM seen_jobs").fetchone()[0]
-        status_dist = {s: 0 for s in VALID_STATUSES}
-        for r in c.execute("SELECT status, COUNT(*) FROM seen_jobs GROUP BY status"):
-            status_dist[r[0]] = r[1]
-        avg = c.execute("SELECT AVG(match_score) FROM seen_jobs WHERE match_score > 0").fetchone()[0]
-        score_dist = {"high": 0, "mid": 0, "low": 0}
-        for (s,) in c.execute("SELECT match_score FROM seen_jobs WHERE match_score > 0"):
-            if s >= 75:
-                score_dist["high"] += 1
-            elif s >= 50:
-                score_dist["mid"] += 1
-            else:
-                score_dist["low"] += 1
-        by_date = {
-            r[0]: r[1]
-            for r in c.execute(
-                "SELECT date(first_seen_at, 'unixepoch', 'localtime') d, COUNT(*) n "
-                "FROM seen_jobs WHERE first_seen_at >= ? GROUP BY d",
-                (now - 13 * day,),
-            )
-        }
-        top_jobs = [
-            dict(r)
-            for r in c.execute(
-                "SELECT platform, job_id, title, company, city, salary, match_score, url "
-                "FROM seen_jobs ORDER BY match_score DESC LIMIT 5"
-            )
-        ]
-        recent_jobs = [
-            dict(r)
-            for r in c.execute(
-                "SELECT platform, job_id, title, company, city, salary, match_score, url, first_seen_at "
-                "FROM seen_jobs ORDER BY first_seen_at DESC LIMIT 6"
-            )
-        ]
+        rows = [_row_to_dict(r) for r in c.execute(
+            "SELECT platform, job_id, title, company, city, salary, url, status, "
+            "first_seen_at, llm_analysis FROM seen_jobs"
+        )]
+    total = len(rows)
+    status_dist = {s: 0 for s in VALID_STATUSES}
+    for r in rows:
+        if r.get("status") in status_dist:
+            status_dist[r["status"]] += 1
+
+    scored = [(r, _ai_score(r)) for r in rows]
+    scored = [(r, s) for r, s in scored if s is not None]
+    analyzed_count = len(scored)
+    avg_score = round(sum(s for _, s in scored) / analyzed_count) if analyzed_count else 0
+    score_dist = {"high": 0, "mid": 0, "low": 0}
+    for _, s in scored:
+        if s >= AI_SCORE_HIGH:
+            score_dist["high"] += 1
+        elif s >= AI_SCORE_MID:
+            score_dist["mid"] += 1
+        else:
+            score_dist["low"] += 1
+
+    by_date = {}
+    for r in rows:
+        fs = r.get("first_seen_at")
+        if fs and fs >= now - 13 * day:
+            d = datetime.date.fromtimestamp(fs).isoformat()
+            by_date[d] = by_date.get(d, 0) + 1
+
+    def slim(r, s):
+        return {"platform": r["platform"], "job_id": r["job_id"], "title": r["title"],
+                "company": r["company"], "city": r["city"], "salary": r["salary"],
+                "url": r["url"], "ai_score": s, "first_seen_at": r.get("first_seen_at")}
+
+    # 高分榜只在已分析岗里排（未打分岗无可比性），同分按入库时间新者在前
+    top_jobs = [slim(r, s) for r, s in
+                sorted(scored, key=lambda t: (t[1], t[0].get("first_seen_at") or 0),
+                       reverse=True)[:5]]
+    recent_jobs = [slim(r, _ai_score(r)) for r in
+                   sorted(rows, key=lambda r: r.get("first_seen_at") or 0, reverse=True)[:6]]
+
     today = datetime.date.today()
     trend = []
     for i in range(13, -1, -1):
@@ -418,8 +438,9 @@ def get_stats() -> Dict:
         trend.append({"date": d, "count": by_date.get(d, 0)})
     return {
         "total": total,
+        "analyzed_count": analyzed_count,
         "status_dist": status_dist,
-        "avg_score": round(avg or 0),
+        "avg_score": avg_score,
         "score_dist": score_dist,
         "trend_14d": trend,
         "top_jobs": top_jobs,
@@ -604,13 +625,6 @@ def _row_to_dict(r: sqlite3.Row) -> Dict:
             d["tags"] = []
     else:
         d["tags"] = []
-    if d.get("score_detail"):
-        try:
-            d["score_detail"] = json.loads(d["score_detail"])
-        except Exception:
-            d["score_detail"] = {}
-    else:
-        d["score_detail"] = {}
     if d.get("llm_analysis"):
         try:
             d["llm_analysis"] = json.loads(d["llm_analysis"])

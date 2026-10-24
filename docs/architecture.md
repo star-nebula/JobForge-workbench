@@ -72,7 +72,7 @@ flowchart TB
   end
 
   subgraph C["能力模块（server 同进程 import）"]
-    SP["spider.py<br/>简历关键词抽取 · 4 维打分 · 多城列表抓取"]
+    SP["spider.py<br/>简历关键词抽取 · 城市硬门槛 · 多城列表抓取"]
     FJ["fetch_jd.py<br/>通道调度 auto/native/cdp + clean_jd"]
     FN["fetch_jd_native.py<br/>UIA 定位 · 键鼠注入 · 跨进程节流"]
     LM["llm.py<br/>OpenAI 兼容 chat + 3 个能力函数"]
@@ -203,8 +203,6 @@ erDiagram
     text education
     text tags "JSON 数组"
     text url "原始详情页链接"
-    integer match_score "规则 4 维综合 0-100"
-    text score_detail "JSON 分维"
     text status "6 值词汇表"
     text notes
     integer first_seen_at "判新岗"
@@ -250,7 +248,7 @@ erDiagram
   }
 
   profile ||--o{ resume_versions : "同一资料的不同快照"
-  profile ||--o{ seen_jobs : "简历抽取关键词 → 抓取词与匹配分母"
+  profile ||--o{ seen_jobs : "简历抽取关键词 → 抓取词 + AI 分析上下文"
   seen_jobs ||--o{ messages : "软匹配：公司名/岗位名互相包含，无外键"
   seen_jobs ||--o{ scrape_log : "一次抓取落一条"
 ```
@@ -265,11 +263,10 @@ SQLite 只有标量列，真正影响前端渲染的结构挤在 TEXT 列里。�
 
 | 宿主列 | 形状 | 谁写 | 谁读 |
 |---|---|---|---|
-| `seen_jobs.tags` | `string[]` | 原生通道归一 | 规则打分的技能分母 / 卡片标签 |
-| `seen_jobs.score_detail` | `{overall, skills_match, experience_match, salary_match, location_match, reasoning}` | `spider.calc_match_score` | 卡片迷你条、详情弹窗分维 |
-| `seen_jobs.llm_analysis` | `{verdict, score, strengths[≤4], gaps[≤4], advice[≤3], model}` | `llm.analyze_match` | 卡片蓝标「AI xx」、详情弹窗 AI 段、升档判定 |
+| `seen_jobs.tags` | `string[]` | 原生通道归一 | `llm.analyze_match` 输入 / 卡片标签行 / 弹窗技能对照 |
+| `seen_jobs.llm_analysis` | `{verdict, score, strengths[≤4], gaps[≤4], advice[≤3], model}` | `llm.analyze_match` | **唯一的匹配判断来源**：卡片那一个数字（无则「待分析」）、详情弹窗 AI 段、升档判定、看板 `get_stats` 聚合 |
 | `seen_jobs.jd_text` | 纯文本，`clean_jd` 出口兜底清洗 | 三层降级抓取 / 详情弹窗重抓 | 弹窗正文、`llm.analyze_match` 输入 |
-| `profile.data` | `{name, phone, email, target_position, city, expected_salary, skills[], summary, experience, education, projects, resume_text}` | `PUT /api/profile`（全量覆盖） | 抓取词与城市、打招呼语、润色、打分、流水线前置检查（缺 `resume_text` 直接拒跑） |
+| `profile.data` | `{name, phone, email, target_position, city, expected_salary, skills[], summary, experience, education, projects, resume_text}` | `PUT /api/profile`（全量覆盖） | 抓取词与城市、打招呼语、润色、AI 分析上下文、简历体检（`profile_score`）、流水线前置检查（缺 `resume_text` 直接拒跑） |
 | `app_settings.data` | `{llm: {configs: [{id, name, base_url, api_key, model}], active_id}}` | `PUT /api/llm/configs` | `_get_llm_config`（显式 model_id → active → 第一个） |
 
 `api_key` 只存本地 SQLite，读出时一律脱敏成 `****尾4位`；前端把掩码串回传时按 id 沿用旧真值，不会覆盖。
@@ -330,7 +327,7 @@ flowchart TD
 
   D1 --> E["① 抓列表（server 线程内）<br/>crawl_boss_native：view-source 读 joblist.json"]
   D2 --> E
-  E --> F["_normalize_boss → calc_match_score(4 维)<br/>按 match_score 倒序"]
+  E --> F["_normalize_boss → 保持列表自身顺序<br/>（2026-10-13 本地分整族下线，不再打分/重排<br/>→ 熔断早停时先抓谁由 BOSS 顺序决定）"]
   F --> G["db.upsert_jobs<br/>新岗 status=discovered · 老岗保留 status/notes<br/>db.add_scrape_log（含失败）"]
   G --> H["按库为准重读行<br/>to_fetch = jd_text 为空的全部<br/>新岗 + 库里缺 JD 的老岗"]
   H --> I{"to_fetch 非空?"}
@@ -440,7 +437,7 @@ flowchart LR
 | 暂停/停止信号 | `fetch_gate.json` | `_batch.stop`/`_batch_cancel`（进程内，与文件位并存） | `tests/test_progress.py`（`JOBFORGE_GATE_FILE` 隔离） |
 | JD 覆盖口径 | 前端本地 `_computeJdStats`（当前列表口径）／后端 `db.get_jd_stats`（全库口径） | **两份实现，前端只用了自己那份** → 见 §7 漂移点 | `tests/test_db.py::test_jd_stats` 只钉后端份 |
 | 抓取循环的停止/熔断口径 | `server._batch_run`（一份） | 无 —— 流水线曾自己抄了一遍并只认超时，已合并 | 见 `_batch_run` 头注释（2026-10-09 修） |
-| 匹配分母与打分维度 | `spider.calc_match_score` | `score_detail` 落库供回看 | `tests/test_spider.py` |
+| 匹配判断口径 | `seen_jobs.llm_analysis.score`（`llm.analyze_match` 产出，唯一来源） | 卡片分数位、看板 `get_stats` 聚合、升档判定都读同一列；**分档阈值 75/50 写了两份**：`db.AI_SCORE_HIGH/AI_SCORE_MID` 与前端 `_aiTone` | `tests/test_db.py::test_stats_*`（聚合与分母）、`tests/test_frontend_status_contract.py::test_local_score_family_is_retired`（本地分不许回潮） |
 | LLM 配置选择顺序 | `server._get_llm_config` | 弹窗与批量的 model_id 透传 | `tests/test_server.py` |
 | 子进程可引导性 | `-m jobforge.*` + `PYTHONPATH=src` | server 启动兜底注入 PYTHONPATH | `tests/test_package_imports.py`（静态扫平级导入 + 子进程冒烟） |
 | `.bat` 行尾 | `.gitattributes` `*.bat text eol=crlf` | — | LF 下 cmd.exe 按字节偏移误解析，静默吃掉 `set "PYTHONPATH=..."` |
@@ -448,6 +445,7 @@ flowchart LR
 ### 6.1 现存技术债 / 已下线但保留
 
 - **L1 粗筛整族已下线**（2026-10-09），`triage_keep/triage_reason/triage_at` 三列与历史数据按裁定保留供复核；`init_db` 里那条 `UPDATE ... WHERE triage_keep=1` 只剩兜老库的作用。
+- **本地规则评分整族已下线**（2026-10-13，用户裁定「整族删掉」），处置与粗筛**相反**：`spider.calc_match_score` 函数族、`seen_jobs.match_score/score_detail` 两列、以及全部展示面一起删除，不留只读列也不留隐形排序权重。DROP 走 `tools/migrate_drop_local_score.py`（自带热备 + 端口占用即拒跑 + 幂等），不进 `init_db()`；`init_db` 里那条会把已删列 ALTER 加回来的兼容分支同批移除——留着它，退场就不成立。
 - 升档入口已从「粗筛 keep=1」改为「AI 分 ≥ 70」。
 - `use_mock` 参数、`CrawlReq.platform="all"` 属兼容签名，实际只有 `boss`。
 - 前端未接线的端点见下表 —— 它们是**能力不是界面**，删它们要连带删对应测试与内部调用方。
@@ -466,7 +464,7 @@ flowchart LR
 ## 7. 本图已知漂移点（写图时发现，未修）
 
 1. **JD 覆盖统计有两份实现，UI 只接了本地那份。** `web/job-workbench.html:1257` 的提示文案写「全库口径见数据看板」，但看板 `/api/stats` 并不含 JD 覆盖字段 —— 全库口径实际上无处可看。要么让看板接 `/api/jobs/jd-stats`，要么改文案。
-2. **README 的「两档匹配」表述与 L1 下线后现状有落差。** README 讲 tag 粗筛（抓取时算）+ JD 精配，这与代码一致；但同一份 README 未提「已分析过的岗不再重复烧 token」「缺 JD 的老岗会被补抓」这两条额度口径，用户体感时长由它们主导。
+2. **README 的额度口径仍缺一块。** 原「两档匹配（tag 粗筛 + JD 精配）」的表述落差已在 2026-10-13 闭合（本地分整族下线，README 七语版同步改成 AI 单轨）；仍未写清的是「已分析过的岗不再重复烧 token」「缺 JD 的老岗会被补抓」这两条 —— 用户体感的单次任务时长恰恰由它们主导，而不是由岗位总数主导。
 3. **`_batch` 是进程内字典**，页面刷新后 `/api/analyze-batch/status` 仍能拿到，但**服务重启即丢**——批次结果面板靠 `finished_at` 判快照新旧，重启后的「上次结果」不存在。这不算 bug，属于「进度态刻意不落库」的设计，图上标出以免误加持久化。
 
 ---

@@ -362,7 +362,11 @@
   .kcard-co{font-size:var(--fs-12);color:var(--text-2);margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .kcard-meta{display:flex;justify-content:space-between;align-items:center;gap:var(--s2);font-size:var(--fs-12);color:var(--text-3);margin-top:9px}
   .kcard-meta > span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .kcard-score{font-weight:700;font-size:var(--fs-14);color:var(--accent-2);font-variant-numeric:tabular-nums}
+  .kcard-score{font-weight:700;font-size:var(--fs-14);color:var(--text-2);font-variant-numeric:tabular-nums}
+  .kcard-score--hi{color:var(--green-fg)}
+  .kcard-score--mid{color:var(--yellow-fg)}
+  .kcard-score--low{color:var(--red-fg)}
+  .kcard-score--todo{font-weight:600;font-size:var(--fs-12);color:var(--text-3)}
   .kcard-foot{display:flex;align-items:center;justify-content:space-between;gap:6px;margin-top:10px;padding-top:9px;border-top:1px solid var(--border)}
   .kcard-foot--stack{flex-wrap:wrap}
   .kcard-foot--stack>.kcard-state{flex:0 0 100%}
@@ -387,12 +391,6 @@
     font-size:var(--fs-11);color:var(--text-2);
   }
   .tag--accent{background:var(--accent-soft);border-color:var(--accent-line);color:var(--accent-2)}
-  .mini-bars{display:inline-flex;align-items:flex-end;gap:2px;height:16px}
-  .mb{width:3px;background:var(--text-3);min-height:3px;border-radius:1px}
-  .mb-high{background:var(--green)}
-  .mb-mid{background:var(--accent-2)}
-  .mb-low{background:#3a4453}
-  .score-cluster{display:inline-flex;align-items:center;gap:6px}
 
   /* ========================================================= 岗位市场 */
   .view#jobs.active{overflow:hidden}
@@ -766,7 +764,6 @@
   .ai-score--hi{color:var(--green-fg)}
   .ai-score--mid{color:var(--yellow-fg)}
   .ai-score--low{color:var(--red-fg)}
-  .ai-score--brand{color:var(--accent-2)}
   .ai-verdict{font-size:var(--fs-13);color:var(--text-2);flex:1;min-width:0}
   .ai-re{font-size:var(--fs-11);color:var(--text-3);cursor:pointer;white-space:nowrap}
   .ai-re:hover{color:var(--accent)}
@@ -899,13 +896,6 @@
   }
   .jd-notes{display:flex;gap:var(--s2);align-items:center;margin-top:10px}
   .jd-notes input{flex:1;min-width:0}
-  .scorecard{
-    display:flex;align-items:center;gap:var(--s4);flex-wrap:wrap;
-    background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius-sm);
-    padding:12px 14px;margin-bottom:14px;
-  }
-  .scorecard-dims{display:flex;gap:var(--s3);margin-left:auto;font-size:var(--fs-12);color:var(--text-3);font-variant-numeric:tabular-nums}
-  .scorecard-dims b{color:var(--text-2);font-weight:700}
   .callout{
     display:flex;gap:9px;padding:10px 12px;border-radius:var(--radius-sm);
     background:var(--bg-3);border:1px solid var(--border);
@@ -1105,9 +1095,9 @@
             <svg class="stat-spark" viewBox="0 0 80 30" id="statSpark"></svg>
           </div>
           <div class="stat-card" style="--bar:var(--slate)">
-            <div class="stat-label">高匹配岗位</div>
+            <div class="stat-label" title="AI 分析分 ≥75 的岗位数；均分只统计已 AI 分析的岗，未分析的不计入">AI 高分岗</div>
             <div class="stat-value" id="statHigh">0</div>
-            <div class="stat-delta" id="statHighDelta">平均匹配 0 分</div>
+            <div class="stat-delta" id="statHighDelta">已分析 0/0 · 平均 0</div>
           </div>
           <div class="stat-card" style="--bar:var(--purple)">
             <div class="stat-label">已投递</div>
@@ -1152,8 +1142,8 @@
 
           <div class="panel">
             <div class="panel-head">
-              <div class="panel-title">岗位匹配度 Top 5</div>
-              <div class="panel-sub">按匹配分排序</div>
+              <div class="panel-title">AI 高分岗 Top 5</div>
+              <div class="panel-sub">已分析岗位按 AI 分排序</div>
             </div>
             <div id="topJobRows"></div>
           </div>
@@ -1258,9 +1248,8 @@
           <div class="filterbar-sep"></div>
           <span class="filterbar-grp">
             <label class="filterbar-label" for="sortSel">排序</label>
-            <select id="sortSel" class="select" title="排序：综合分 = AI 分析分优先、没分析过的按标签初筛分；初筛分 = 本地规则分；最新发现 = 抓取入库时间">
-              <option value="smart">综合分（AI 优先）</option>
-              <option value="score">标签初筛分</option>
+            <select id="sortSel" class="select" title="排序：AI 分析分 = AI 通读 JD 后的打分，还没分析的排最后；最新发现 = 抓取入库时间">
+              <option value="smart">AI 分析分</option>
               <option value="new">最新发现</option>
             </select>
           </span>
@@ -1618,13 +1607,14 @@ let _otherCityCount=0;  // 后端告知的「被 L0 城市门槛隐藏」的岗�
 let _jdStats=null;      // 后端 JD 覆盖统计快照
 let _jdFilter='';       // '' | 'has' | 'missing' | 'thin'：按 JD 获取情况筛选
 let _statusFilter='';   // '' = 全部，否则 STATUS_META 的 key（阶段2 A2）
-let _sortKey='smart';   // 'smart' = 综合分（AI 分析分优先、缺则初筛分）| 'score' | 'new'（10-03 用户裁定默认综合分）
+let _sortKey='smart';   // 'smart' = AI 分析分 | 'new' = 最新发现（2026-10-13 本地分下线，只剩两档）
+                        // key 仍叫 smart：老用户 localStorage 里存的就是它，改名等于把默认值丢掉
 // 筛选/排序持久化（D 组）：进页面恢复上次的筛选状态，词表校验防止 localStorage 里存了过时值
 (function(){
   const get=(k,ok)=>{const v=localStorage.getItem(k);return v!=null&&ok(v)?v:null;};
   if(get('jf_jd',v=>['has','missing','thin'].includes(v)))_jdFilter=localStorage.getItem('jf_jd');
   if(get('jf_status',v=>!!STATUS_BY_KEY[v]))_statusFilter=localStorage.getItem('jf_status');
-  if(get('jf_sort',v=>['smart','score','new'].includes(v)))_sortKey=localStorage.getItem('jf_sort');
+  if(get('jf_sort',v=>['smart','new'].includes(v)))_sortKey=localStorage.getItem('jf_sort');
 })();
 function _saveMktFilters(){
   localStorage.setItem('jf_sort',_sortKey);
@@ -1634,9 +1624,18 @@ function _saveMktFilters(){
 const JD_THIN_LEN=100;  // 与后端 db.JD_THIN_LEN 同口径
 function _hasJd(j){return !!(j&&j.jd_text&&String(j.jd_text).trim())}
 function _isThinJd(j){return _hasJd(j)&&String(j.jd_text).trim().length<JD_THIN_LEN&&!j.jd_confirmed}
-function _smartScore(j){
-  const ai=j&&j.llm_analysis&&j.llm_analysis.score;
-  return (ai!=null?ai:(j&&j.match_score)||0);
+// 匹配判断只剩 AI 一条链路（按技能/意向/薪资/城市打分的那套本地算法已于 2026-10-13 整族下线）
+function _aiScoreOf(j){
+  const s=j&&j.llm_analysis&&j.llm_analysis.score;
+  return typeof s==='number'?s:null;      // 没分析过就是没分析过，不冒充 0 分
+}
+function _aiTone(s){return s>=75?'hi':s>=50?'mid':'low'}   // 与后端 db.AI_SCORE_HIGH/MID 同口径
+// 卡片上唯一的匹配数字。市场卡与看板卡共用：同一个岗位在两个视图必须同一个读法
+function _scoreSlot(j){
+  const s=_aiScoreOf(j);
+  if(s==null)return `<span class="kcard-score kcard-score--todo" title="还没跑 AI 分析">待分析</span>`;
+  const v=j.llm_analysis&&j.llm_analysis.verdict;
+  return `<span class="kcard-score kcard-score--${_aiTone(s)}" title="AI 分析分${v?'：'+_escHtml(v):''}">${s}</span>`;
 }
 // 清全部市场筛选（JD/状态），恢复当前排序的全量视图
 function _clearAllFilters(){
@@ -1750,17 +1749,16 @@ function _renderJobList(jobs,q){
   }
   _renderJdStats();
   let shown=_visibleJobs(jobs,q);
-  // 排序（阶段2 A2）：默认综合分（AI 分析分优先、缺则初筛分）；同级按 last_seen 稳定
-  const keyF=_sortKey==='score'?(j=>j.match_score||0)
-            :_sortKey==='new'?(j=>j.last_seen_at||j.first_seen_at||0)
-            :_smartScore;
+  // 排序：只剩 AI 分析分 / 最新发现；未分析岗按 -1 沉底（0 是真实低分，不能当「没分」），同级按 last_seen 稳定
+  const keyF=_sortKey==='new'?(j=>j.last_seen_at||j.first_seen_at||0)
+            :(j=>_aiScoreOf(j)??-1);
   shown=[...shown].sort((a,b)=>keyF(b)-keyF(a)||((b.last_seen_at||0)-(a.last_seen_at||0)));
   const _filtersOn=_jdFilter||_statusFilter;
   const sub=document.getElementById('jobsSubtitle');
   if(sub){
     const only=document.getElementById('onlyExpectedCity');
     const hiding=!!(only&&only.checked);
-    const sortName=_sortKey==='smart'?'综合分（AI 优先）':_sortKey==='score'?'初筛分':'最新发现';
+    const sortName=_sortKey==='smart'?'AI 分析分':'最新发现';
     sub.innerHTML=`已缓存 <span id="jobsCount">${jobs.length}</span> 个岗位 · 按${sortName}倒序`
       +(_otherCityCount?` · ${hiding?'已隐藏':'含'} ${_otherCityCount} 个异地岗`:'')
       +(_filtersOn?` · 当前显示 ${shown.length} 个`:'');
@@ -1781,9 +1779,7 @@ function _renderJobList(jobs,q){
       <div class="kcard-co">${_hl([j.company,j.city].filter(Boolean).join(' · '),q)}</div>
       <div class="kcard-meta">
         <span class="num">${_hl(j.salary,q)||'面议'}</span>
-        <span class="score-cluster" title="初筛 ${j.match_score||0}＝本地规则按技能/意向/薪资/城市粗算${j.llm_analysis&&j.llm_analysis.score!=null?`；AI 分析 ${j.llm_analysis.score}＝AI 通读 JD 后结合标签/薪资/城市评分`:''}">
-          ${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span>${j.llm_analysis&&j.llm_analysis.score!=null?`<span class="chip chip--ai" title="AI 分析分（AI 通读 JD 后打分）">AI ${j.llm_analysis.score}</span>`:''}
-        </span>
+        ${_scoreSlot(j)}
       </div>
       ${(j.tags||[]).length?`<div class="job-tags">${(j.tags||[]).slice(0,3).map(t=>`<span class="tag">${_hl(t,q)}</span>`).join('')}</div>`:''}
       <div class="kcard-foot kcard-foot--stack">
@@ -1905,7 +1901,7 @@ function renderKanbanCard(j){
       ${ivw}
       <div class="kcard-meta">
         <span class="num">${j.salary||'面议'}</span>
-        <span class="score-cluster">${renderMiniBars(j.score_detail)}<span class="kcard-score">${j.match_score||0}</span></span>
+        ${_scoreSlot(j)}
       </div>
       <div class="kcard-foot">
         <a class="ext-link" href="${j.url||''}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${ICO('external','i--12')}原始岗位</a>
@@ -1997,7 +1993,8 @@ function renderDashStat(s){
   const set=(id,v)=>{const el=document.getElementById(id);if(el)el.textContent=v;};
   set('statTotal',s.total||0);
   const trend=s.trend_14d||[];
-  // 口径标注（A3）：看板是全库口径（含异地岗），岗位市场默认只看期望城市——同屏数字不同要有出处
+  // 口径标注（A3 + 10-13 改判）：看板是全库口径（含异地岗），而岗位市场默认只看期望城市；
+  // 均分/高分只统计已 AI 分析的岗并把分母写在 delta 上——同屏数字不同、样本不是全体，都要有出处
   set('statTotalDelta',(s.other_city_count?`含异地岗 ${s.other_city_count} · `:'')+'近 7 天 +'+trend.slice(7).reduce((a,t)=>a+t.count,0));
   const spark=document.getElementById('statSpark');
   if(spark){
@@ -2006,7 +2003,7 @@ function renderDashStat(s){
     spark.innerHTML=`<polyline points="${vals.map((v,i)=>`${2+i/(vals.length-1||1)*76},${27-(v/max)*23}`).join(' ')}" fill="none" style="stroke:var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
   }
   set('statHigh',(s.score_dist||{}).high||0);
-  set('statHighDelta','平均匹配 '+(s.avg_score||0)+' 分');
+  set('statHighDelta',`已分析 ${s.analyzed_count||0}/${s.total||0} · 平均 ${s.avg_score||0}`);
   const st=s.status_dist||{};
   set('statApplied',st.applied||0);
   set('statInterviewing',st.interviewing||0);
@@ -2073,7 +2070,7 @@ function renderDashRecent(list){
       <div class="act-ico">${ICO('briefcase')}</div>
       <div class="act-main">
         <div class="act-text">发现 <b>${j.title||''}</b> · ${j.company||''}</div>
-        <div class="act-time">${PLATFORM_NAME[j.platform]||j.platform||''} · ${j.city||''} · <span class="num">${j.salary||'面议'}</span> · 匹配 ${j.match_score||0} · ${dashTime(j.first_seen_at)}</div>
+        <div class="act-time">${PLATFORM_NAME[j.platform]||j.platform||''} · ${j.city||''} · <span class="num">${j.salary||'面议'}</span> · ${j.ai_score==null?'待分析':'AI '+j.ai_score} · ${dashTime(j.first_seen_at)}</div>
       </div>
     </div>
   `).join('');
@@ -2094,7 +2091,7 @@ function renderDashTop(list){
         <div class="pipe-name">${j.title||''}</div>
         <div class="act-time">${j.company||''} · ${j.city||''} · <span class="num">${j.salary||'面议'}</span></div>
       </div>
-      <span class="pipe-count num">${j.match_score||0}</span>
+      <span class="pipe-count num">${j.ai_score}</span>
     </div>
   `).join('');
 }
@@ -2885,22 +2882,6 @@ document.getElementById('batchLiveBtn').addEventListener('click',async()=>{
 // ===== Smart Scrape =====
 const PLATFORM_NAME={boss:'BOSS直聘'};
 
-// P3: 4 维匹配度 mini bar 渲染
-function renderMiniBars(sd){
-  if(!sd)return'';
-  const dims=[
-    {k:'skills_match',n:'技'},
-    {k:'experience_match',n:'经'},
-    {k:'salary_match',n:'薪'},
-    {k:'location_match',n:'地'}
-  ];
-  return `<div class="mini-bars" title="${(sd.reasoning||'').replace(/"/g,'&quot;')}">${dims.map(d=>{
-    const v=sd[d.k]||0;
-    const cls=v>=75?'mb-high':v>=50?'mb-mid':'mb-low';
-    return `<div class="mb ${cls}" style="height:${Math.max(8,v*0.18)}px" title="${d.n} ${v}"></div>`;
-  }).join('')}</div>`;
-}
-
 // P2: PDF 上传
 const pdfDrop=document.getElementById('pdfDropzone');
 const pdfInput=document.getElementById('pdfFileInput');
@@ -3171,26 +3152,22 @@ function renderScrapeResults(data){
   }
   const hideSeen=document.getElementById('hideSeenToggle').checked;
   const shown=hideSeen?jobs.filter(j=>j.is_new):jobs;
-  const card=j=>{
-    const sc=j.match_score||50;
-    return `
+  const card=j=>`
       <div class="kcard" data-platform="${j.platform}" data-job-id="${j.job_id}">
         <div class="kcard-title"><a href="${j.url||''}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${j.title}</a>${j.is_new?`<span class="chip chip--accent">NEW</span>`:`<span class="chip chip--soft">已在市场</span>`}</div>
         <div class="kcard-co">${j.company}</div>
         <div class="kcard-meta">
           <span class="num">${j.salary||'面议'}</span>
-          <span class="score-cluster">${renderMiniBars(j.score_detail)}<span class="kcard-score">${sc}</span></span>
+          ${_scoreSlot(j)}
         </div>
         <div class="kcard-loc">${ICO('map-pin','i--12')}${j.city||''} · ${j.experience||''} · ${j.education||''} · ${PLATFORM_NAME[j.platform]||j.platform}</div>
         ${(j.tags||[]).length?`<div class="job-tags">${j.tags.slice(0,5).map(t=>`<span class="tag">${t}</span>`).join('')}</div>`:''}
-        ${(j.score_detail&&j.score_detail.reasoning)?`<div class="callout">${ICO('sparkle')}<span>${_escHtml(j.score_detail.reasoning)}</span></div>`:''}
         <div class="kcard-foot">
           <span></span>
           <a class="ext-link" href="${j.url||''}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">${ICO('external','i--12')}原始岗位</a>
         </div>
       </div>
     `;
-  };
   let html='';
   if(!shown.length){
     html=`<div class="empty span-all"><div class="empty-ico">${ICO('check')}</div><div class="empty-title">本次没有新岗位</div><div class="empty-hint">${jobs.length} 个都已在岗位市场${hideSeen?'，关闭「隐藏已在岗位市场的岗位」可查看全量':''}</div></div>`;
@@ -3666,7 +3643,7 @@ async function _runAnalysis(j,refresh,box){
   }
 }
 function _renderAnalysis(a,j){
-  const tone=a.score>=75?'hi':a.score>=50?'mid':'low';
+  const tone=_aiTone(a.score);
   const lis=(arr,mod,ico)=>`<div class="ai-list">${arr.map(t=>`<div class="ai-row ai-row--${mod}">${ICO(ico)}<span>${_escHtml(t)}</span></div>`).join('')}</div>`;
   return `<div class="ai-card">
     <div class="ai-head">
@@ -3758,22 +3735,11 @@ function renderJobDetailModal(j){
   const body=document.getElementById('jdModalBody');
   const link=document.getElementById('jdModalLink');
   link.href=j.url||'#';
-  const dims=j.score_detail||{};
-  const dimRow=[['技',dims.skills_match],['经',dims.experience_match],['薪',dims.salary_match],['城',dims.location_match]]
-    .map(([n,v])=>`<span>${n} <b class="num">${v==null?'-':v}</b></span>`).join('');
   const cd=_ivwCountdown(j.interview_at);
   _jdModalJob=j;
   head.innerHTML=_jdHeadHtml(j);
   body.innerHTML=`
     ${j.interview_at?`<div class="callout callout--ok">${ICO('calendar')}<span>面试：${_escHtml(cd.text)}${j.interview_note?` · ${_escHtml(j.interview_note)}`:''}</span></div>`:''}
-    ${j.match_score?`
-      <div class="scorecard">
-        <div class="ai-score ai-score--brand">${j.match_score}<small> 标签初筛</small></div>
-        <span class="chip chip--soft" title="本地规则粗算，非 AI 结论；AI 通读 JD 后的分析分见下方分析卡">≠ AI 结论</span>
-        ${renderMiniBars(j.score_detail)}
-        <div class="scorecard-dims">${dimRow}</div>
-      </div>
-      ${dims.reasoning?`<div class="fine-note" style="margin:0 0 12px">${ICO('sparkle','i--12')}<span>${_escHtml(dims.reasoning)}</span></div>`:''}`:''}
     ${_skillCompareHtml(j.tags||[])}
     <div id="aiAnalysisBox"></div>
     <div class="sec-label">职位描述（JD）</div>
@@ -3837,7 +3803,7 @@ async function loadJobJd(j, refresh){
     box.innerHTML=`<div class="empty empty--inline">
       <div class="empty-ico">${ICO('file-text')}</div>
       <div class="empty-title">该岗位还没有缓存 JD 全文</div>
-      <div class="empty-hint">抓取需要接管键鼠操作桌面 Chrome 约 30 秒（期间请勿动键鼠）；上方的技能对照与标签初筛不依赖 JD，可先看。</div>
+      <div class="empty-hint">抓取需要接管键鼠操作桌面 Chrome 约 30 秒（期间请勿动键鼠）；上方的技能对照不依赖 JD，可先看。</div>
       <div class="empty-act">
         <button class="btn primary" id="jdFetchBtn">${ICO('download','i--12')}抓取 JD 全文</button>
         <a class="ext-link" href="${j.url||'#'}" target="_blank" rel="noopener noreferrer">直接去 BOSS 看 ${ICO('external','i--12')}</a>

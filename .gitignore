@@ -9,4 +9,5 @@ data/
 
 # 工具与临时目录
 _server.log
+_smoke_server.log
 .zcode/

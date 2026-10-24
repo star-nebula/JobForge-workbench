@@ -13,8 +13,7 @@ def tmp_db(tmp_path, monkeypatch):
 
 def _job(job_id="abc123", **over):
     j = {"platform": "boss", "job_id": job_id, "title": "前端工程师", "company": "X 公司",
-         "salary": "20-30K", "city": "上海", "tags": ["React"], "url": "https://zhipin.com/x",
-         "match_score": 77}
+         "salary": "20-30K", "city": "上海", "tags": ["React"], "url": "https://zhipin.com/x"}
     j.update(over)
     return j
 
@@ -220,3 +219,50 @@ def test_init_db_backfills_legacy_triage_kept(tmp_db):
     assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
     tmp_db.init_db()
     assert tmp_db.get_job("boss", "abc123")["status"] == "reviewing"
+
+
+# ---------- 看板聚合：AI 单轨口径（2026-10-13 本地规则分整族下线） ----------
+
+def test_stats_only_counts_analyzed_with_denominator(tmp_db):
+    """均分/分档只在已 AI 分析的岗上算，且必须同时给出分母 analyzed_count/total。
+    166 份样本的均分不能被说成 238 个岗的真值——前端展示就靠这两个数拼「已分析 x/y」。"""
+    tmp_db.upsert_jobs([_job(job_id=id) for id in ("a", "b", "c", "d", "e")])
+    tmp_db.save_job_analysis("boss", "a", {"score": 80})     # high
+    tmp_db.save_job_analysis("boss", "b", {"score": 75})     # high（边界含）
+    tmp_db.save_job_analysis("boss", "c", {"score": 50})     # mid（边界含）
+    tmp_db.save_job_analysis("boss", "d", {"score": 49})     # low
+    # e 完全不分析
+    s = tmp_db.get_stats()
+    assert s["total"] == 5
+    assert s["analyzed_count"] == 4
+    assert s["avg_score"] == 64                    # round((80+75+50+49)/4)
+    assert s["score_dist"] == {"high": 2, "mid": 1, "low": 1}
+    assert sum(s["score_dist"].values()) == s["analyzed_count"]
+
+
+def test_stats_rejects_non_numeric_score(tmp_db):
+    """score=true 或坏 JSON 不进聚合：bool 是 int 子类，不能当分数冒充已分析。"""
+    tmp_db.upsert_jobs([_job(job_id="a"), _job(job_id="b")])
+    tmp_db.save_job_analysis("boss", "a", {"score": True})
+    with tmp_db._conn() as c:      # 绕过 save_job_analysis 直接塞坏 JSON
+        c.execute("UPDATE seen_jobs SET llm_analysis='{\"score\": 90' WHERE job_id='b'")
+    s = tmp_db.get_stats()
+    assert s["total"] == 2 and s["analyzed_count"] == 0
+    assert s["avg_score"] == 0 and s["score_dist"] == {"high": 0, "mid": 0, "low": 0}
+
+
+def test_stats_top_jobs_excludes_unanalyzed(tmp_db):
+    """高分榜只在已分析岗里排：未分析岗没有可比性，进 Top5 就是把「没看过」冒充「不重要」。
+    字段名从 match_score 改为 ai_score，本地分列已随整族下线。"""
+    tmp_db.upsert_jobs([_job(job_id="hi1"), _job(job_id="lo1"), _job(job_id="new_raw")])
+    tmp_db.save_job_analysis("boss", "hi1", {"score": 91})
+    tmp_db.save_job_analysis("boss", "lo1", {"score": 12})
+    top = tmp_db.get_stats()["top_jobs"]
+    assert [j["job_id"] for j in top] == ["hi1", "lo1"]     # new_raw 未分析 → 不在榜
+    assert top[0]["ai_score"] == 91 and "match_score" not in top[0]
+    recent = tmp_db.get_stats()["recent_jobs"]
+    assert len(recent) == 3
+    assert {j["job_id"] for j in recent} == {"hi1", "lo1", "new_raw"}
+    by_id = {j["job_id"]: j for j in recent}
+    assert by_id["new_raw"]["ai_score"] is None             # 待分析在 UI 里显式呈现
+    assert by_id["hi1"]["ai_score"] == 91

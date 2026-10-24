@@ -1230,11 +1230,12 @@ async def upload_resume_pdf(file: UploadFile = File(...)):
 
 @app.post("/api/scrape-from-resume")
 def scrape_from_resume(req: ScrapeFromResumeReq):
-    """根据简历自动抓取并按匹配度排序的岗位。
-    抓完后 upsert 到 seen_jobs（SQLite 去重缓存），返回的每个岗位带 is_new + score_detail 字段。
+    """根据简历关键词抓岗位（不再做本地规则打分，匹配判断统一交给 AI 分析）。
+    抓完后 upsert 到 seen_jobs（SQLite 去重缓存），返回的每个岗位带 is_new。
+    顺序保持岗位列表自身顺序（2026-10-13 起本地分整族下线，不再按本地分重排）。
     """
     keywords = spider.extract_resume_keywords(req.resume_text)
-    # 搜索词：显式指定（自由关键词入口）优先，留空才从简历推导；匹配度评分始终用简历关键词
+    # 搜索词：显式指定（自由关键词入口）优先，留空才从简历推导
     query = (req.query or "").strip() \
         or keywords["target_position"] or " ".join(keywords["skills"][:3]) or "前端工程师"
     city = req.city or _profile_city() or keywords["city"] or "全国"
@@ -1251,13 +1252,6 @@ def scrape_from_resume(req: ScrapeFromResumeReq):
         ok = result.get("source") == "real"
         sc.set(done=1, ok=1 if ok else 0, failed=0 if ok else 1,
                last_error="" if ok else (result.get("error") or "抓取失败"))
-
-    # 计算匹配度（P3：4 维 + reasoning）+ 拍平到 job
-    for job in result["jobs"]:
-        sd = spider.calc_match_score(job, keywords)
-        job["match_score"] = sd["overall"]
-        job["score_detail"] = sd
-    result["jobs"].sort(key=lambda j: j["match_score"], reverse=True)
 
     # upsert 到 SQLite + 标 is_new
     is_new_flags = db.upsert_jobs(result["jobs"])

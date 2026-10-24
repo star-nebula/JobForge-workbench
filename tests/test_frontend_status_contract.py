@@ -10,6 +10,9 @@
 
 2026-10-09 改判（P4/P5）：进评估列改由 AI 分析分驱动，L1 粗筛接口族整体下线
 （`triage_keep` 列与历史数据按用户裁定保留），本文件里带日期的段落是当时口径，不是现状。
+
+2026-10-13 改判：本地规则评分（`calc_match_score` / `match_score` / `score_detail`）整族下线，
+处置与粗筛相反——列与名字都不留，匹配判断只剩 AI 分析分一条链路（见 test_local_score_family_is_retired）。
 """
 import re
 from pathlib import Path
@@ -90,12 +93,43 @@ def test_notes_field_is_sent(src):
 
 
 def test_market_sort_and_status_filter(src):
-    """阶段2 A2：市场默认排序=综合分（10-03 用户裁定）；状态下拉选项从 STATUS_META 派生。
-    状态下拉若另写一份词汇表，这里会红。"""
-    assert re.search(r'<select id="sortSel".*?<option value="smart"', src, re.S)
-    assert "_sortKey='smart'" in src
+    """阶段2 A2 + 2026-10-13 本地分下线：排序只剩两档（AI 分析分 / 最新发现）。
+    下拉项、localStorage 白名单、默认值三处必须是同一套 key——各自写一份必然漂移。
+    状态下拉仍从 STATUS_META 派生，另写一份词汇表这里会红。"""
+    sel = re.search(r'<select id="sortSel".*?</select>', src, re.S).group(0)
+    assert re.findall(r'<option value="([a-z]+)"', sel) == ["smart", "new"]
+    assert "AI 分析分" in sel and "最新发现" in sel
+    assert "_sortKey='smart'" in src                              # key 沿用 smart：改名等于把老用户持久化值清掉
+    assert "['smart','new'].includes(v)" in src                    # 白名单与下拉项同集合，历史 'score' 自动落回默认
+    assert "(j=>_aiScoreOf(j)??-1)" in src                         # 未分析按 -1 沉底（0 是真实低分，不能当「没分」）
     assert "statusSel.addEventListener" in src and "STATUS_META.forEach" in src
     assert "_clearAllFilters" in src
+
+
+def test_local_score_family_is_retired(src):
+    """2026-10-13 用户裁定「整族删掉」：本地规则评分不留隐形排序权重、不留只读列、不留任何展示面。
+
+    与 `triage_keep`（2026-10-09 裁定「列与历史数据保留、只删写入口」）**处置相反**，
+    所以这里必须钉的是「列与名字都不许回来」，而不只是「没有写入口」。
+
+    不许当禁词的反例（误伤过一次，别再犯）：
+      - `score` / `ai-score` / `.kcard-score`：AI 分析分正在用的类名与字段，卡片那唯一数字就挂在这里；
+      - 裸 `本地规则`：简历体检 profile_score 是本地规则引擎，html:1213 与 server.py:18 的注释合法；
+      - `分析` / `匹配` / `profile_score`：AI 卡与简历体检的正常用词。
+    """
+    for dead in ("match_score", "score_detail", "calc_match_score", "_parse_salary_k",
+                 "renderMiniBars", "mini-bars", "score-cluster", "kcard-score--local",
+                 "ai-score--brand", "scorecard", "_smartScore", 'value="score"',
+                 "标签初筛", "初筛", "本地规则分", "本地打分"):
+        assert dead not in src, f"本地评分家族残留未删净：{dead}"
+    # 匹配判断只剩一条链路：卡片上只该有一个分数出口
+    assert src.count("_scoreSlot(j)") >= 3, "市场/看板/抓取弹窗三处卡片没共用同一个分数位"
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("src/jobforge/spider.py", "src/jobforge/db.py", "src/jobforge/server.py"):
+        py = (root / rel).read_text(encoding="utf-8")
+        for dead in ("calc_match_score", "match_score", "score_detail"):
+            assert dead not in py, f"{rel} 里还有已下线符号：{dead}"
 
 
 def test_triage_surface_is_retired(src):
