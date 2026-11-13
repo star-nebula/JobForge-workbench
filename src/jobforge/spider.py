@@ -17,7 +17,18 @@ import time
 import hashlib
 from typing import List, Dict, Any, Optional
 
-from jobforge import fetch_gate, fetch_jd_native, paths
+from jobforge import fetch_gate, paths
+
+
+class _LazyNativeModule:
+    """Load the Windows-only desktop channel only when scraping is invoked."""
+
+    def __getattr__(self, name):
+        from jobforge import fetch_jd_native
+        return getattr(fetch_jd_native, name)
+
+
+fetch_jd_native = _LazyNativeModule()
 
 # ---------- 通用配置 ----------
 HEADERS = {

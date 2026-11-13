@@ -37,6 +37,7 @@ FastAPI + spider.py
 """
 import io
 import json
+import logging
 import os
 import re
 import requests
@@ -44,7 +45,9 @@ import subprocess
 import sys
 import threading
 import time
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from fastapi import FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -56,6 +59,8 @@ if __package__ in (None, ""):   # 直接跑脚本（python src/jobforge/server.p
 
 from jobforge import db, fetch_gate, llm, paths, profile_score, spider
 from jobforge.fetch_jd import clean_jd
+from jobforge.service import install_http_runtime
+from jobforge.settings import get_settings
 
 # 抓取/HUD 子进程按 `-m jobforge.*` 拉起，需要 src 在 PYTHONPATH 里（run.bat 已设，这里兜底）
 _PYTHONPATH = os.environ.get("PYTHONPATH", "")
@@ -71,20 +76,65 @@ MESSAGES_MODULE = "jobforge.tools.messages"
 FETCH_JD_MODULE = "jobforge.fetch_jd"
 NATIVE_MODULE = "jobforge.fetch_jd_native"
 
-app = FastAPI(title="JobForge 求职工作台 API", version="1.0.0")
+APP_VERSION = "1.1.0"
+_settings = get_settings()
+_service_logger = logging.getLogger("jobforge.service")
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    db.init_db()
+    _service_logger.info(
+        "service.started",
+        extra={
+            "event": "service.started",
+            "service": _settings.service_name,
+            "version": APP_VERSION,
+            "environment": _settings.environment,
+            "auth_enabled": _settings.auth_enabled,
+        },
+    )
+    yield
+    _service_logger.info(
+        "service.stopped",
+        extra={"event": "service.stopped", "service": _settings.service_name},
+    )
+
+
+app = FastAPI(title="JobForge 求职工作台 API", version=APP_VERSION, lifespan=_lifespan)
+install_http_runtime(app)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(_settings.cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-@app.on_event("startup")
-def _on_startup():
-    """启动时初始化 SQLite 库。"""
-    db.init_db()
+@app.get("/health/live", include_in_schema=False)
+def health_live(request: Request):
+    return {
+        "status": "ok",
+        "service": _settings.service_name,
+        "version": APP_VERSION,
+        "environment": _settings.environment,
+        "request_id": request.state.request_id,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.get("/health/ready", include_in_schema=False)
+def health_ready(request: Request):
+    database = db.healthcheck()
+    if not database.get("ok"):
+        raise HTTPException(status_code=503, detail="Database is not ready")
+    return {
+        "status": "ready",
+        "service": _settings.service_name,
+        "version": APP_VERSION,
+        "request_id": request.state.request_id,
+        "checks": {"database": {"status": "up", **database}},
+    }
 
 
 # ---------- 请求模型 ----------
@@ -1691,11 +1741,11 @@ def index():
 
 
 # ---------- 一键重启（run.bat restart → python -m jobforge.server --restart） ----------
-def _parse_argv(argv: List[str]) -> Tuple[int, bool]:
+def _parse_argv(argv: List[str], default_port: int = 8080) -> Tuple[int, bool]:
     """端口：默认 8080；可用 --port 8090 或 --port=8090 覆盖
     （调试/自测起第二个实例用；悬浮窗按此端口连回来，不会串到正式实例）。
     --restart：同端口已有实例时先安全结束它，而不是放弃启动。"""
-    port, restart = 8080, False
+    port, restart = default_port, False
     for i, a in enumerate(argv):
         if a == "--port" and i + 1 < len(argv):
             port = int(argv[i + 1])
@@ -1711,8 +1761,15 @@ def _http_get(port: int, path: str) -> Tuple[Optional[int], bytes]:
     非 2xx 也返回状态码——「有人在应答」本身就说明端口被占。"""
     import urllib.error
     import urllib.request
+    headers = {}
+    api_key = (os.environ.get("JOBFORGE_API_KEY") or "").strip()
+    if api_key:
+        headers["X-API-Key"] = api_key
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}{path}", headers=headers
+    )
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=3) as r:
+        with urllib.request.urlopen(request, timeout=3) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
         return e.code, b""
@@ -1820,9 +1877,10 @@ def _stop_existing(port: int) -> bool:
 
 if __name__ == "__main__":
     import uvicorn
-    port, restart = _parse_argv(sys.argv[1:])
+    runtime_settings = get_settings()
+    port, restart = _parse_argv(sys.argv[1:], default_port=runtime_settings.port)
     os.environ["JOBFORGE_PORT"] = str(port)
-    # 只监听本机回环：接口无鉴权且含个人求职数据，不暴露到局域网（2026-09-26）
+    # 默认只监听本机回环；容器/部署场景可通过 JOBFORGE_HOST 显式覆盖。
     # 防重复启动（如连点两次 run.bat）：启动前探活同端口。
     # 注意：venv 的 python.exe 会派生出基础解释器子进程，任务管理器里两个 python
     # 属同一实例的正常父子形态（2026-09-27 曾误判为「双实例双绑」，已更正）。
@@ -1834,5 +1892,5 @@ if __name__ == "__main__":
         if not _stop_existing(port):
             sys.exit(1)
         print(f"[JobForge] 旧实例已结束，正在以新代码启动 {port} …")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    uvicorn.run(app, host=runtime_settings.host, port=port)
 

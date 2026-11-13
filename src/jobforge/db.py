@@ -148,6 +148,26 @@ def init_db():
         """)
 
 
+def healthcheck() -> Dict:
+    """Read-only readiness probe for the local SQLite store."""
+    try:
+        with _conn() as c:
+            table = c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='seen_jobs'"
+            ).fetchone()
+            if table is None:
+                raise RuntimeError("seen_jobs table is missing")
+            c.execute("SELECT 1").fetchone()
+        return {"ok": True, "engine": "sqlite", "schema": "ready"}
+    except Exception as exc:
+        return {
+            "ok": False,
+            "engine": "sqlite",
+            "schema": "unavailable",
+            "error": type(exc).__name__,
+        }
+
+
 def upsert_jobs(jobs: List[Dict]) -> List[Dict]:
     """批量 upsert 岗位列表。返回每个岗位是否本次新增（is_new=true）。
     已存在的岗位更新 last_seen_at + 抓到的字段，但保留原 status/notes。"""

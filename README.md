@@ -83,6 +83,40 @@ This table says *what each file does*. For *why they are wired this way* — whe
    - **Stop** takes effect within seconds (it also kills the running scrape subprocess); jobs already scraped and AI analyses already finished are kept
    - The window defaults to the bottom-right corner; drag ⠿ to move it. After a task ends it stays a few seconds to show results and then closes automatically; ✕ closes it immediately
 
+## Service Operations
+
+The desktop app remains the primary Windows workflow. The API can also run as a
+single-user demo/control-plane service with structured JSON logs, request IDs,
+health probes, optional API-key authentication, and one error envelope:
+
+```powershell
+# Public probes
+curl.exe http://127.0.0.1:8080/health/live
+curl.exe http://127.0.0.1:8080/health/ready
+
+# Optional authentication for /api/*
+$env:JOBFORGE_API_KEY = "<set-a-local-secret>"
+curl.exe -H "X-API-Key: <set-a-local-secret>" http://127.0.0.1:8080/api/platforms
+```
+
+`JOBFORGE_API_KEY` is disabled by default. The current browser UI and floating
+HUD do not attach that header, so keep it unset for the normal desktop workflow;
+use it for API clients or a future authenticated frontend.
+
+For an isolated API demo, Docker Compose uses a named volume rather than the real
+`data/` directory:
+
+```powershell
+docker compose up --build
+curl.exe http://127.0.0.1:8080/health/ready
+docker compose down
+```
+
+The container is an API/control-plane demo only. It cannot drive Windows Chrome
+or the native keyboard/mouse scraping channel. See
+[`docs/engineering-hardening.md`](docs/engineering-hardening.md) for the verified
+runtime contract, configuration, tradeoffs, and known limitations.
+
 ## Privacy
 
 `data/` (`jobs.db`, `messages.json`, `cookies.json`, `fetch_gate.json`, `hud_pos.json`, etc.) and the browser profile (`chrome-profile/`, canonical location `data/chrome-profile`) are excluded via `.gitignore` and never committed.

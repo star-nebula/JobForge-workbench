@@ -1,0 +1,31 @@
+name: jobforge
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      JOBFORGE_ENV: container
+      JOBFORGE_HOST: 0.0.0.0
+      JOBFORGE_PORT: "8080"
+      JOBFORGE_LOG_FORMAT: json
+      JOBFORGE_API_KEY: ${JOBFORGE_API_KEY:-}
+    ports:
+      - "127.0.0.1:${JOBFORGE_PORT:-8080}:8080"
+    volumes:
+      - jobforge-demo-data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health/ready', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  jobforge-demo-data:

@@ -50,3 +50,26 @@ def test_fetch_jd_subprocess_boots():
     assert r.returncode == 0, f"子进程引导失败：{(r.stderr or '')[-500:]}"
     out = json.loads(r.stdout.strip())
     assert out["ok"] is False and "参数不足" in out["error"]
+
+
+def test_server_import_does_not_require_windows_desktop_modules():
+    """The API/control-plane must boot in a Linux container without pywinauto.
+
+    Native scraping remains host-only and imports those modules lazily when the
+    Windows path is actually exercised.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(SRC)
+    code = (
+        "import sys; "
+        "[sys.modules.__setitem__(name, None) for name in "
+        "('pyautogui', 'pygetwindow', 'pyperclip', 'pywinauto')]; "
+        "import jobforge.server; print('ok')"
+    )
+    r = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+        cwd=str(SRC.parent), env=env,
+    )
+    assert r.returncode == 0, (r.stderr or r.stdout)[-1000:]
+    assert r.stdout.strip() == "ok"
