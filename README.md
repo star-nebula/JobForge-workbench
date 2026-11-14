@@ -34,6 +34,7 @@ JobForge-workbench/
 ├─ web/job-workbench.html        # Frontend single page (6 views)
 ├─ data/                         # Runtime data (not committed): jobs.db, cookies.json, messages.json, gate/throttle files, chrome-profile/
 ├─ tests/                        # pytest regression suite (`pip install -r requirements-dev.txt` first, then `venv\Scripts\python.exe -m pytest tests/`; test counts are not documented here — run them to see)
+├─ scripts/verify.py  verify.cmd # One-command verification: dependency preflight + pytest + a real-process HTTP smoke test (see "Verification" below); not imported by product code
 ├─ docs/                         # architecture.md (information-architecture maps, written in Chinese) + screenshots/
 ├─ run.bat  setup.bat  requirements.txt  README.md
 ```
@@ -116,6 +117,35 @@ The container is an API/control-plane demo only. It cannot drive Windows Chrome
 or the native keyboard/mouse scraping channel. See
 [`docs/engineering-hardening.md`](docs/engineering-hardening.md) for the verified
 runtime contract, configuration, tradeoffs, and known limitations.
+
+## Verification
+
+One command runs everything:
+
+```powershell
+verify.cmd             # or: venv\Scripts\python.exe scripts\verify.py
+verify.cmd --fast      # only the real-process HTTP smoke test (~4s)
+verify.cmd --only http # only checks whose name contains "http"
+verify.cmd -v          # expand each check's full output
+```
+
+What it runs: dependency preflight → `pytest tests/` → a **real-process** HTTP smoke
+test that boots `jobforge.server` under uvicorn on a free port and talks to it over
+sockets. The smoke test hits `/health/live` and `/health/ready`, then sends real write
+requests (`PUT /api/profile`, `POST /api/profile/versions`, `PATCH /api/jobs/...`)
+and asserts persisted rows by opening the temporary SQLite file separately — it never
+trusts the HTTP response body to prove a write happened. It also checks the index page
+body and the 422/404 error envelopes.
+
+Scope, stated plainly: `pytest tests/` mostly calls route functions directly with the
+DB mocked, so it locks logic branches but does **not** cover real HTTP. The HTTP smoke
+test covers one write path per subsystem, not every endpoint — scraping, LLM calls and
+the native Windows channel are out of its reach by design.
+
+Exit codes: `0` all passed, `1` something failed (the failing check is named with the
+original error), `2` inconclusive — missing dependencies or the server could not boot,
+so nothing was proven (never reported as a pass). The smoke test always points the DB
+at a temp file; it never touches `data/jobs.db`.
 
 ## Privacy
 

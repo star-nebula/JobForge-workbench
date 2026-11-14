@@ -16,3 +16,6 @@ data/
 _server.log
 _smoke_server.log
 .zcode/
+
+# 本机装配：CLAUDE.md 是指向 E:\knowledge\GlobalAGENTS.md 的软链，绝不入库
+CLAUDE.md
